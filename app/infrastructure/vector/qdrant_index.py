@@ -208,6 +208,7 @@ class QdrantVectorIndex:
                 query_filter=query_filter,
                 limit=top_k,
                 with_vectors=False,
+                score_threshold=filters.min_score,
             )
         except AttributeError:
             hits = self.client.query_points(
@@ -216,6 +217,7 @@ class QdrantVectorIndex:
                 query_filter=query_filter,
                 limit=top_k,
                 with_vectors=False,
+                score_threshold=filters.min_score,
             ).points
         results: list[RetrievalResult] = []
         for hit in hits:

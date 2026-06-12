@@ -18,10 +18,8 @@ def retrieval_service(request: Request):
 @router.post("/retrieval/search", response_model=RetrievalSearchResponse)
 def search(request: Request, body: RetrievalSearchRequest):
     def action():
-        filters = request_filters_to_domain(body.filters)
+        filters = request_filters_to_domain(body.filters, body.min_score)
         results = retrieval_service(request).search(body.query, filters=filters, top_k=body.top_k)
-        if body.min_score is not None:
-            results = [result for result in results if result.score >= body.min_score]
         return RetrievalSearchResponse(
             query=body.query,
             results=[retrieval_result_to_response(result) for result in results],

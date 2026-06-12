@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ class DocumentResponse(BaseModel):
     id: str
     title: str
     status: str
+    created_at: datetime
     source: SourceResponse
     tags: dict[str, str] = Field(default_factory=dict)
 
@@ -55,7 +57,7 @@ class RetrievalSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=50)
     filters: RetrievalFiltersRequest = Field(default_factory=RetrievalFiltersRequest)
-    min_score: float | None = Field(default=None, ge=0, le=1)
+    min_score: float = Field(default=0.5, ge=0, le=1)
 
 
 class RetrievalResultResponse(BaseModel):
@@ -82,6 +84,7 @@ def document_to_response(document: Document, tags: list[Tag] | None = None) -> D
         id=document.id,
         title=document.title,
         status=document.status.value,
+        created_at=document.created_at,
         source=SourceResponse(
             kind=document.source.kind,
             uri=document.source.uri,

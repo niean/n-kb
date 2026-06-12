@@ -18,7 +18,6 @@ def make_chunk(text="hello", ordinal=0):
         metadata={"ordinal": ordinal},
     )
 
-
 def test_build_point_maps_chunk_vector_tags_and_source_to_payload():
     chunk = make_chunk("hello rag", 0)
     vector = EmbeddingVector(chunk_id=chunk.id, model="bge-m3", dimensions=2, values=[0.1, 0.2])
@@ -43,6 +42,20 @@ def test_build_point_maps_chunk_vector_tags_and_source_to_payload():
     }
 
 
+class FakeQueryPointsResponse:
+    def __init__(self, points):
+        self.points = points
+
+
+class FakeQueryPointsOnlyClient:
+    def __init__(self):
+        self.query_points_calls = []
+
+    def query_points(self, collection_name, query, query_filter, limit, with_vectors, score_threshold=None):
+        self.query_points_calls.append((collection_name, query, query_filter, limit, with_vectors, score_threshold))
+        return FakeQueryPointsResponse([])
+
+
 class FakeQdrantClient:
     def __init__(self):
         self.collections = set()
@@ -65,10 +78,9 @@ class FakeQdrantClient:
     def delete(self, collection_name, points_selector):
         self.deletes.append((collection_name, points_selector))
 
-    def search(self, collection_name, query_vector, query_filter, limit, with_vectors):
-        self.searches.append((collection_name, query_vector, query_filter, limit, with_vectors))
+    def search(self, collection_name, query_vector, query_filter, limit, with_vectors, score_threshold=None):
+        self.searches.append((collection_name, query_vector, query_filter, limit, with_vectors, score_threshold))
         return self.search_result
-
 
 def test_replace_document_ensures_collection_upserts_and_deletes_stale_points():
     client = FakeQdrantClient()
@@ -84,7 +96,6 @@ def test_replace_document_ensures_collection_upserts_and_deletes_stale_points():
     assert client.upserts[0][1][0]["payload"]["chunk_id"] == "doc-1-chunk-0"
     assert client.deletes
 
-
 def test_replace_document_with_empty_chunks_deletes_document_points_without_upsert():
     client = FakeQdrantClient()
     index = QdrantVectorIndex("http://qdrant:6333", "n_kb", client=client)
@@ -99,6 +110,32 @@ def test_replace_document_with_empty_chunks_deletes_document_points_without_upse
     assert point_filter.must[0].key == "document_id"
     assert point_filter.must[0].match.value == "doc-1"
     assert point_filter.must_not == []
+
+def test_search_does_not_apply_score_threshold_by_default():
+    client = FakeQdrantClient()
+    index = QdrantVectorIndex("http://qdrant:6333", "n_kb", client=client)
+
+    index.search([0.1, 0.2], RetrievalFilter(), top_k=5)
+
+    assert client.searches[0][5] is None
+
+
+def test_search_passes_explicit_score_threshold_to_qdrant():
+    client = FakeQdrantClient()
+    index = QdrantVectorIndex("http://qdrant:6333", "n_kb", client=client)
+
+    index.search([0.1, 0.2], RetrievalFilter(min_score=0.3), top_k=5)
+
+    assert client.searches[0][5] == 0.3
+
+
+def test_search_passes_explicit_score_threshold_to_query_points():
+    client = FakeQueryPointsOnlyClient()
+    index = QdrantVectorIndex("http://qdrant:6333", "n_kb", client=client)
+
+    index.search([0.1, 0.2], RetrievalFilter(min_score=0.3), top_k=5)
+
+    assert client.query_points_calls[0][5] == 0.3
 
 
 def test_search_maps_hits_to_retrieval_results_with_bounded_snippets():
@@ -134,7 +171,6 @@ def test_search_maps_hits_to_retrieval_results_with_bounded_snippets():
     assert result.metadata == {"ordinal": 0}
     assert client.searches[0][:4] == ("n_kb", [0.1, 0.2], index._build_filter(RetrievalFilter(tags={"topic": "rag"}, source_kind="upload")), 1)
     assert client.searches[0][4] is False
-
 
 def test_health_returns_ok_when_collections_can_be_fetched():
     client = FakeQdrantClient()

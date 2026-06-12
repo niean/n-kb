@@ -21,6 +21,9 @@ class FakeDocumentRepository:
     def get_document(self, document_id):
         return self.document if self.document and self.document.id == document_id else None
 
+    def find_by_content_hash(self, content_hash):
+        return self.document if self.document and self.document.content_hash == content_hash else None
+
     def get_content(self, document_id):
         return self.content if self.content and self.content.document_id == document_id else None
 

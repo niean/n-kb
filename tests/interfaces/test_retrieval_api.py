@@ -32,7 +32,6 @@ def build_client(service=None) -> TestClient:
     register_routes(app)
     return TestClient(app)
 
-
 def test_search_returns_query_and_results_without_vector_fields():
     service = FakeRetrievalService()
     client = build_client(service)
@@ -68,7 +67,17 @@ def test_search_returns_query_and_results_without_vector_fields():
         "tags": {"topic": "rag"},
         "source_kind": "upload",
         "document_status": "indexed",
+        "min_score": 0.5,
     }
+
+def test_search_uses_default_min_score_when_not_provided():
+    service = FakeRetrievalService()
+    client = build_client(service)
+
+    response = client.post("/retrieval/search", json={"query": "what is rag"})
+
+    assert response.status_code == 200
+    assert service.call["filters"].min_score == 0.5
 
 
 def test_search_runtime_error_returns_infrastructure_error_without_details():
@@ -84,7 +93,6 @@ def test_search_runtime_error_returns_infrastructure_error_without_details():
     assert response.json() == {"error": {"code": "infrastructure_error", "message": "infrastructure_error"}}
 
 
-
 def test_search_rejects_top_k_above_limit():
     client = build_client()
 
@@ -92,7 +100,6 @@ def test_search_rejects_top_k_above_limit():
 
     assert response.status_code == 422
     assert "detail" in response.json()
-
 
 
 def test_search_rejects_blank_query():

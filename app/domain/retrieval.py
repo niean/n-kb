@@ -7,6 +7,7 @@ class RetrievalFilter:
     tags: dict[str, str] = field(default_factory=dict)
     source_kind: str | None = None
     document_status: str | None = None
+    min_score: float | None = None
 
 
 @dataclass(frozen=True)

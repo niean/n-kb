@@ -58,6 +58,15 @@ def test_sqlite_store_initializes_schema_indexes_and_round_trips_document(tmp_pa
     assert "idx_index_jobs_document_created_at" in job_indexes
 
 
+def test_sqlite_store_finds_document_by_content_hash(tmp_path):
+    store = SQLiteStore(tmp_path / "n-kb.db")
+    document = make_document()
+    store.save_document(document, make_content(), [])
+
+    assert store.find_by_content_hash("hash-1") == document
+    assert store.find_by_content_hash("missing") is None
+
+
 def test_replace_chunks_replaces_existing_chunks_in_ordinal_order(tmp_path):
     store = SQLiteStore(tmp_path / "n-kb.db")
     store.save_document(make_document(), make_content(), [])

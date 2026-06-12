@@ -156,6 +156,14 @@ class SQLiteStore:
             row = connection.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
         return self._document_from_row(row) if row else None
 
+    def find_by_content_hash(self, content_hash: str) -> Document | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM documents WHERE content_hash = ? ORDER BY created_at LIMIT 1",
+                (content_hash,),
+            ).fetchone()
+        return self._document_from_row(row) if row else None
+
     def get_content(self, document_id: str) -> DocumentContent | None:
         with self._connect() as connection:
             row = connection.execute(

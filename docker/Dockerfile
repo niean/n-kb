@@ -5,7 +5,8 @@ WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY app /app/app
 
-RUN pip install --no-cache-dir .
+#RUN pip install --no-cache-dir .
+RUN pip install .
 
 EXPOSE 8212
 

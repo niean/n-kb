@@ -1,98 +1,23 @@
-function byId(id) {
-  return document.getElementById(id);
-}
-
-function clear(element) {
-  element.replaceChildren();
-}
-
-function parseTags(value) {
-  const tags = {};
-  value.split(',').map((item) => item.trim()).filter(Boolean).forEach((item) => {
-    const parts = item.split('=');
-    if (parts.length >= 2) {
-      const key = parts.shift().trim();
-      const tagValue = parts.join('=').trim();
-      if (key && tagValue) {
-        tags[key] = tagValue;
-      }
-    }
-  });
-  return tags;
-}
-
-function vdbStatusText(status) {
-  if (status === 'indexed') return '入库成功';
-  if (status === 'failed') return '入库失败';
-  return '未入库';
-}
-
-function statusClass(status) {
-  if (status === 'indexed' || status === 'ok') return 'success';
-  if (status === 'failed' || status === 'error') return 'danger';
-  return 'warning';
-}
-
-function appendText(parent, label, value) {
-  const line = document.createElement('div');
-  line.className = 'row';
-  const key = document.createElement('span');
-  key.className = 'key';
-  key.textContent = label;
-  const val = document.createElement('span');
-  val.className = 'val';
-  val.textContent = value == null || value === '' ? '-' : String(value);
-  line.append(key, val);
-  parent.appendChild(line);
-}
-
-function appendBadge(parent, value, variant) {
-  const badge = document.createElement('span');
-  badge.className = variant ? `badge ${variant}` : 'badge';
-  badge.textContent = value;
-  parent.appendChild(badge);
-}
-
-function renderJson(parent, value) {
-  const pre = document.createElement('pre');
-  pre.textContent = JSON.stringify(value, null, 2);
-  parent.appendChild(pre);
-}
-
-function renderEmpty(parent, message) {
-  const empty = document.createElement('div');
-  empty.className = 'muted';
-  empty.textContent = message;
-  parent.appendChild(empty);
-}
-
-async function fetchJson(url, options) {
-  return fetchJsonFromFetch(fetch(url, options));
-}
-
-async function fetchJsonFromFetch(responsePromise) {
-  const response = await responsePromise;
-  const data = response.status === 204 ? null : await response.json();
-  if (!response.ok) {
-    throw new Error(data && data.error ? data.error.code : 'request_failed');
-  }
-  return data;
-}
+const { api, ui, navigation } = window.NKB;
+const {
+  byId,
+  clear,
+  parseTags,
+  vdbStatusText,
+  statusClass,
+  appendText,
+  appendBadge,
+  renderJson,
+  renderEmpty,
+  renderLoading,
+  renderError,
+} = ui;
 
 let currentDocuments = [];
 let currentHealth = null;
 
 function setLastUpdate() {
   byId('last-update').textContent = `Last updated: ${new Date().toLocaleString('zh-CN')}`;
-}
-
-function switchTab(tabName) {
-  document.querySelectorAll('.tab-content').forEach((tab) => tab.classList.remove('active'));
-  document.querySelectorAll('.sidebar__item').forEach((item) => item.classList.remove('sidebar__item--active'));
-  byId(`tab-${tabName}`).classList.add('active');
-  const nav = document.querySelector(`[data-tab="${tabName}"]`);
-  nav.classList.add('sidebar__item--active');
-  byId('topbar-title').textContent = nav.querySelector('.sidebar__item-label').textContent;
 }
 
 function renderStats(target, stats) {
@@ -112,6 +37,13 @@ function renderStats(target, stats) {
     card.append(label, value, sub);
     target.appendChild(card);
   });
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN');
 }
 
 function healthEntries(health) {
@@ -151,8 +83,10 @@ function renderOverview() {
 async function loadHealth() {
   const target = byId('dependency-health');
   clear(target);
+  renderLoading(target, '正在加载依赖健康状态...');
   try {
-    currentHealth = await fetch('/health/dependencies').then((response) => response.json());
+    currentHealth = await api.getDependencyHealth();
+    clear(target);
     const stats = healthEntries(currentHealth).map(([name, status]) => ({ label: name, value: status, sub: 'dependency' }));
     renderStats(byId('health-stats'), stats.length ? stats : [{ label: 'Dependencies', value: 'unknown', sub: 'no data' }]);
     healthEntries(currentHealth).forEach(([name, status]) => {
@@ -174,7 +108,8 @@ async function loadHealth() {
     setLastUpdate();
   } catch (error) {
     currentHealth = { status: 'error' };
-    renderEmpty(target, error.message);
+    clear(target);
+    renderError(target, error.message);
     renderOverview();
   }
 }
@@ -182,49 +117,61 @@ async function loadHealth() {
 async function loadDocuments() {
   const target = byId('document-list');
   clear(target);
-  const params = new URLSearchParams();
+  renderLoading(target, '正在加载文档列表...');
   const tags = byId('filter-tags').value.trim();
   const status = byId('filter-status').value.trim();
-  if (tags) params.set('tags', tags);
-  if (status) params.set('status', status);
-  const suffix = params.toString() ? `?${params.toString()}` : '';
   try {
-    currentDocuments = await fetch('/documents' + suffix).then((response) => response.json());
-    currentDocuments.forEach((doc) => {
-      const item = document.createElement('div');
-      item.className = 'item';
-      appendText(item, 'Title:', doc.title);
-      appendBadge(item, vdbStatusText(doc.status), statusClass(doc.status));
-      appendText(item, 'VDB:', vdbStatusText(doc.status));
-      appendText(item, 'ID:', doc.id);
-      appendText(item, 'Source:', doc.source.display_name || doc.source.uri);
-      appendText(item, 'Tags:', JSON.stringify(doc.tags || {}));
-      const actions = document.createElement('div');
-      actions.className = 'item-actions';
-      const detailButton = document.createElement('button');
-      detailButton.className = 'btn';
-      detailButton.type = 'button';
-      detailButton.textContent = 'Detail';
-      detailButton.addEventListener('click', () => showDocument(doc.id));
-      const indexButton = document.createElement('button');
-      indexButton.className = 'btn';
-      indexButton.type = 'button';
-      indexButton.textContent = 'Index';
-      indexButton.addEventListener('click', () => indexDocument(doc.id));
-      const deleteButton = document.createElement('button');
-      deleteButton.className = 'btn danger';
-      deleteButton.type = 'button';
-      deleteButton.textContent = 'Delete';
-      deleteButton.addEventListener('click', () => deleteDocument(doc.id));
-      actions.append(detailButton, indexButton, deleteButton);
-      item.appendChild(actions);
-      target.appendChild(item);
-    });
-    if (!currentDocuments.length) renderEmpty(target, '暂无文档');
+    currentDocuments = await api.listDocuments({ tags, status });
+    clear(target);
+    if (!currentDocuments.length) {
+      renderEmpty(target, '暂无文档');
+    } else {
+      const table = document.createElement('table');
+      table.className = 'document-table';
+      const thead = document.createElement('thead');
+      const headerRow = document.createElement('tr');
+      ['文件名', '操作'].forEach((label) => {
+        const th = document.createElement('th');
+        th.textContent = label;
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      const tbody = document.createElement('tbody');
+      currentDocuments.forEach((doc) => {
+        const row = document.createElement('tr');
+        const titleCell = document.createElement('td');
+        titleCell.textContent = doc.title;
+        const actionsCell = document.createElement('td');
+        const actions = document.createElement('div');
+        actions.className = 'item-actions';
+        const detailButton = document.createElement('button');
+        detailButton.className = 'btn';
+        detailButton.type = 'button';
+        detailButton.textContent = 'Detail';
+        detailButton.addEventListener('click', () => showDocument(doc.id));
+        const indexButton = document.createElement('button');
+        indexButton.className = 'btn';
+        indexButton.type = 'button';
+        indexButton.textContent = 'Index';
+        indexButton.addEventListener('click', () => indexDocument(doc.id));
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'btn danger';
+        deleteButton.type = 'button';
+        deleteButton.textContent = 'Delete';
+        deleteButton.addEventListener('click', () => deleteDocument(doc.id));
+        actions.append(detailButton, indexButton, deleteButton);
+        actionsCell.appendChild(actions);
+        row.append(titleCell, actionsCell);
+        tbody.appendChild(row);
+      });
+      table.append(thead, tbody);
+      target.appendChild(table);
+    }
     renderOverview();
     setLastUpdate();
   } catch (error) {
-    renderEmpty(target, error.message);
+    clear(target);
+    renderError(target, error.message);
   }
 }
 
@@ -256,32 +203,47 @@ async function showDocument(documentId) {
   clear(detail);
   clear(chunksTarget);
   content.textContent = '';
+  renderLoading(detail, '正在加载文档详情...');
+  renderLoading(content, '正在加载文档原文...');
+  renderLoading(chunksTarget, '正在加载 chunk 列表...');
   try {
     const [doc, body, chunks] = await Promise.all([
-      fetchJson(`/documents/${encodeURIComponent(documentId)}`),
-      fetchJson(`/documents/${encodeURIComponent(documentId)}/content`),
-      fetchJson(`/documents/${encodeURIComponent(documentId)}/chunks`),
+      api.getDocument(documentId),
+      api.getDocumentContent(documentId),
+      api.getDocumentChunks(documentId),
     ]);
-    appendText(detail, 'Title:', doc.title);
-    appendBadge(detail, vdbStatusText(doc.status), statusClass(doc.status));
-    appendText(detail, 'Source:', doc.source.display_name || doc.source.uri);
+    clear(detail);
+    appendText(detail, '文件名称:', doc.title);
+    appendText(detail, '录入时间:', formatDateTime(doc.created_at));
+    appendText(detail, 'VDB入库状态:', vdbStatusText(doc.status));
+    appendText(detail, 'ID:', doc.id);
+    appendText(detail, '来源:', doc.source.display_name || doc.source.uri);
     appendText(detail, 'Tags:', JSON.stringify(doc.tags || {}));
+    appendBadge(detail, vdbStatusText(doc.status), statusClass(doc.status));
     content.textContent = body.text;
     renderChunks(chunks);
   } catch (error) {
-    renderEmpty(detail, error.message);
+    const message = error.message || '加载文档失败';
+    clear(detail);
+    clear(chunksTarget);
+    content.textContent = `Unable to load document content: ${message}`;
+    renderError(detail, message);
+    renderError(chunksTarget, message);
   }
 }
 
 async function indexDocument(documentId) {
   const detail = byId('document-detail');
   clear(detail);
+  renderLoading(detail, '正在触发文档入库...');
   try {
-    const job = await fetchJson(`/documents/${encodeURIComponent(documentId)}/index`, { method: 'POST' });
+    const job = await api.indexDocument(documentId);
+    clear(detail);
     renderJson(detail, job);
     await loadDocuments();
   } catch (error) {
-    renderEmpty(detail, error.message);
+    clear(detail);
+    renderError(detail, error.message);
   }
 }
 
@@ -289,18 +251,21 @@ async function deleteDocument(documentId) {
   const detail = byId('document-detail');
   const content = byId('document-content');
   const chunks = byId('document-chunks');
-  clear(detail);
-  if (!window.confirm('Delete this document?')) {
+  if (!window.confirm(`Delete document ${documentId}?`)) {
     return;
   }
+  clear(detail);
+  renderLoading(detail, '正在删除文档...');
   try {
-    await fetchJson(`/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
+    await api.deleteDocument(documentId);
+    clear(detail);
     detail.textContent = 'Document deleted';
     content.textContent = '';
     clear(chunks);
     await loadDocuments();
   } catch (error) {
-    renderEmpty(detail, error.message);
+    clear(detail);
+    renderError(detail, error.message);
   }
 }
 
@@ -308,17 +273,20 @@ async function uploadDocument(event) {
   event.preventDefault();
   const target = byId('upload-result');
   clear(target);
+  renderLoading(target, '正在上传文档...');
   const formData = new FormData();
   const file = byId('upload-file').files[0];
   formData.append('file', file);
   formData.append('source', byId('upload-source').value);
   formData.append('tags', byId('upload-tags').value);
   try {
-    const doc = await fetchJson('/documents', { method: 'POST', body: formData });
+    const doc = await api.uploadDocument(formData);
+    clear(target);
     renderJson(target, doc);
     await loadDocuments();
   } catch (error) {
-    renderEmpty(target, error.message);
+    clear(target);
+    renderError(target, error.message);
   }
 }
 
@@ -326,6 +294,7 @@ async function searchRetrieval(event) {
   event.preventDefault();
   const target = byId('retrieval-results');
   clear(target);
+  renderLoading(target, '正在检索...');
   const minScore = byId('retrieval-min-score').value.trim();
   const sourceKind = byId('retrieval-source-kind').value.trim();
   const documentStatus = byId('retrieval-document-status').value.trim();
@@ -341,11 +310,8 @@ async function searchRetrieval(event) {
     body.min_score = Number(minScore);
   }
   try {
-    const data = await fetchJsonFromFetch(fetch('/retrieval/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }));
+    const data = await api.searchRetrieval(body);
+    clear(target);
     if (!data.results.length) {
       renderEmpty(target, '暂无检索结果');
       return;
@@ -363,27 +329,23 @@ async function searchRetrieval(event) {
       target.appendChild(item);
     });
   } catch (error) {
-    renderEmpty(target, error.message);
+    clear(target);
+    renderError(target, error.message);
   }
-}
-
-function initNavigation() {
-  byId('sidebar-toggle').addEventListener('click', () => {
-    const expanded = document.body.classList.toggle('sidebar-expanded');
-    byId('sidebar-toggle').setAttribute('aria-expanded', String(expanded));
-  });
-  document.querySelectorAll('.sidebar__item').forEach((button) => {
-    button.addEventListener('click', () => switchTab(button.dataset.tab));
-  });
 }
 
 async function loadAll() {
   await Promise.all([loadDocuments(), loadHealth()]);
 }
 
-initNavigation();
-byId('refresh-health').addEventListener('click', loadHealth);
-byId('refresh-documents').addEventListener('click', loadDocuments);
-byId('upload-form').addEventListener('submit', uploadDocument);
-byId('retrieval-form').addEventListener('submit', searchRetrieval);
-loadAll();
+function init() {
+  navigation.initNavigation();
+  byId('refresh-health').addEventListener('click', loadHealth);
+  byId('refresh-documents').addEventListener('click', loadDocuments);
+  byId('upload-form').addEventListener('submit', uploadDocument);
+  byId('retrieval-form').addEventListener('submit', searchRetrieval);
+  loadAll();
+}
+
+window.NKB.app = { init };
+window.NKB.app.init();

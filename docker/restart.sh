@@ -6,7 +6,8 @@ cd "$SCRIPT_DIR"
 
 # restart
 docker compose stop n-kb
-docker compose up -d --force-recreate n-kb
+docker compose rm -f n-kb
+docker compose up -d --build --force-recreate n-kb
 echo
 
 # status

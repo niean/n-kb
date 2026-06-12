@@ -153,6 +153,7 @@ curl http://127.0.0.1:8212/health
 - Markdown/Text 原文可能包含密钥或私有信息，日志不得输出完整原文
 - 检索结果 snippet 应限制长度，避免一次性泄漏过多原文
 - FE 使用安全文本渲染，不通过拼接 HTML 注入文档标题、标签、来源或检索片段
+- 管理页前端组件、布局、视觉和交互规范见 `.harness/framework/guides/10-guidelines-fe.md`
 - Shell、任意文件写入、远程抓取等能力不属于默认可公开能力，必须通过后续权限和风险控制设计启用
 - Docker Compose 挂载目录不应指向过大的敏感目录
 - Dockerfile 与 Compose 外部服务镜像应固定到具体版本或 digest；基础运行镜像优先使用 patch tag + sha256 digest

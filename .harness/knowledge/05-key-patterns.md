@@ -88,6 +88,6 @@ Infrastructure 测试验证 SQLite schema、Qdrant adapter 请求转换、Ollama
 
 FE 展示文档标题、原文、来源、标签、chunk 文本和检索片段时使用 textContent 或框架安全渲染，不拼接 innerHTML。
 
-管理页采用 Dashboard-first 控制台：总览展示文档/入库/依赖状态，文档页负责上传、过滤、详情、原文和只读 chunk 可视化，检索页负责 query/top_k/min_score/过滤条件验证，健康页展示依赖状态。
+管理页采用 Dashboard-first 控制台：总览展示文档/入库/依赖状态，文档页负责上传、过滤、详情、原文和只读 chunk 可视化，检索页负责 query/top_k/min_score/过滤条件验证，健康页展示依赖状态；静态资源按职责拆分为 app shell、Design Token 样式、HTTP API helper、安全 UI helper、hash 导航和页面入口脚本；组件、布局、视觉和交互细则见 `.harness/framework/guides/10-guidelines-fe.md`。
 
 陷阱：Markdown 原文和 chunk 文本默认按文本展示；如果后续支持 Markdown 预览，必须引入 sanitizer。chunk 可视化是只读调试能力，不应在 FE 中直接编辑 SQLite/Qdrant 数据。

@@ -122,6 +122,7 @@ def test_upload_document_returns_stable_document_json_and_passes_multipart_field
         "id": "uploaded-1",
         "title": "note.md",
         "status": "uploaded",
+        "created_at": "2026-01-02T00:00:00Z",
         "source": {"kind": "upload", "uri": "note.md", "display_name": "Manual"},
         "tags": {},
     }
