@@ -1,0 +1,22 @@
+[project]
+name = "n-kb"
+version = "0.1.0"
+description = "N-KB RAG service"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic-settings",
+    "python-multipart",
+    "httpx",
+    "qdrant-client",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
