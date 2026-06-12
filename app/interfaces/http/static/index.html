@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N-KB</title>
+  <style>
+    :root {
+      --sidebar-width-collapsed: 52px;
+      --sidebar-width-expanded: 200px;
+      --color-fg-default: #303133;
+      --color-fg-muted: #606266;
+      --color-fg-subtle: #909399;
+      --color-border-default: #dcdfe6;
+      --color-border-muted: #e4e7ed;
+      --color-border-light: #ebeef5;
+      --color-bg-default: #f5f7fa;
+      --color-bg-subtle: #f8f9fa;
+      --color-bg-white: #ffffff;
+      --color-primary: #409eff;
+      --color-success: #67c23a;
+      --color-warning: #e6a23c;
+      --color-danger: #f56c6c;
+      --shadow-card: 0 0 8px 0 rgba(232, 237, 250, 0.6), 0 2px 4px 0 rgba(232, 237, 250, 0.5);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--color-fg-default); background: var(--color-bg-default); font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 10; width: var(--sidebar-width-collapsed); overflow: hidden; background: var(--color-bg-white); border-right: 1px solid #d1d9e0; box-shadow: 1px 0 3px rgba(0, 0, 0, 0.04); transition: width 0.2s ease; }
+    body.sidebar-expanded .sidebar { width: var(--sidebar-width-expanded); }
+    .sidebar__toggle { display: flex; align-items: center; justify-content: center; width: 100%; height: 50px; color: #656d76; background: transparent; border: 0; }
+    body.sidebar-expanded .sidebar__toggle { justify-content: space-between; padding: 0 12px; }
+    .sidebar__brand { display: none; align-items: center; gap: 8px; font-weight: 700; }
+    body.sidebar-expanded .sidebar__brand { display: flex; }
+    .sidebar__brand-icon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; color: #fff; background: var(--color-primary); border-radius: 50%; }
+    .sidebar__toggle-icon { transition: transform 0.2s ease; }
+    body.sidebar-expanded .sidebar__toggle-icon { transform: rotate(180deg); }
+    .sidebar__nav { display: flex; flex-direction: column; gap: 4px; padding: 8px 6px; }
+    .sidebar__item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 8px; color: #656d76; white-space: nowrap; background: transparent; border: 0; border-radius: 8px; }
+    .sidebar__item:hover { color: #1f2328; background: #f6f8fa; }
+    .sidebar__item--active { color: #0969da; background: #eef6ff; }
+    .sidebar__item-icon { width: 20px; text-align: center; }
+    .sidebar__item-label { max-width: 0; overflow: hidden; visibility: hidden; opacity: 0; transition: max-width 0.2s ease, opacity 0.15s; }
+    body.sidebar-expanded .sidebar__item-label { max-width: 140px; visibility: visible; opacity: 1; }
+    .topbar, .main-content { margin-left: var(--sidebar-width-collapsed); transition: margin-left 0.2s ease; }
+    body.sidebar-expanded .topbar, body.sidebar-expanded .main-content { margin-left: var(--sidebar-width-expanded); }
+    .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 20px; background: var(--color-bg-white); border-bottom: 1px solid var(--color-border-muted); }
+    .topbar__title { font-size: 16px; font-weight: 700; }
+    .last-update { color: var(--color-fg-subtle); font-size: 12px; }
+    .main-content { padding: 20px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .stats-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+    .stat-card, .status-panel { background: var(--color-bg-white); border: 1px solid var(--color-border-muted); border-radius: 6px; box-shadow: var(--shadow-card); }
+    .stat-card { padding: 16px 20px; }
+    .stat-card .label { margin-bottom: 6px; color: var(--color-fg-subtle); font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .stat-card .value { color: var(--color-fg-default); font-size: 22px; font-weight: 700; }
+    .stat-card .sub { margin-top: 4px; color: var(--color-fg-subtle); font-size: 11px; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .status-panel { overflow: hidden; margin-bottom: 16px; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; background: var(--color-bg-subtle); border-bottom: 1px solid var(--color-border-muted); font-size: 13px; font-weight: 600; }
+    .panel-body { padding: 14px 16px; }
+    .row { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--color-border-light); font-size: 13px; }
+    .row:last-child { border-bottom: none; }
+    .key { color: var(--color-fg-muted); }
+    .val { font-weight: 500; }
+    .indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+    .indicator.green { background: var(--color-success); }
+    .indicator.red { background: var(--color-danger); }
+    .indicator.yellow { background: var(--color-warning); }
+    .layout-two { display: grid; grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.3fr); gap: 16px; align-items: start; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+    label { display: flex; flex-direction: column; gap: 6px; color: var(--color-fg-muted); font-size: 13px; }
+    input, textarea, select { width: 100%; padding: 8px 10px; color: var(--color-fg-default); background: #fff; border: 1px solid var(--color-border-default); border-radius: 4px; }
+    textarea { min-height: 90px; resize: vertical; }
+    .btn { padding: 8px 14px; color: var(--color-fg-muted); background: #fff; border: 1px solid var(--color-border-default); border-radius: 4px; transition: all 0.2s; }
+    .btn:hover, .btn.primary { color: #fff; background: var(--color-primary); border-color: var(--color-primary); }
+    .btn.danger:hover { color: #fff; background: var(--color-danger); border-color: var(--color-danger); }
+    .item, .result-card, .chunk-card { padding: 12px 0; border-bottom: 1px solid var(--color-border-light); }
+    .item:last-child, .result-card:last-child, .chunk-card:last-child { border-bottom: none; }
+    .item-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; margin: 2px 4px 2px 0; color: var(--color-fg-muted); background: #f6f8fa; border: 1px solid var(--color-border-light); border-radius: 999px; font-size: 12px; }
+    .badge.success { color: #3a7b20; background: #f0f9eb; border-color: #d1edc4; }
+    .badge.warning { color: #946200; background: #fdf6ec; border-color: #faecd8; }
+    .badge.danger { color: #a94442; background: #fef0f0; border-color: #fde2e2; }
+    pre { max-height: 320px; overflow: auto; padding: 12px; margin: 0; color: var(--color-fg-default); background: #f6f8fa; border: 1px solid var(--color-border-light); border-radius: 4px; white-space: pre-wrap; }
+    .muted { color: var(--color-fg-subtle); }
+    @media (max-width: 900px) { .layout-two { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <aside class="sidebar" id="app-sidebar" aria-label="主导航">
+    <button class="sidebar__toggle" id="sidebar-toggle" type="button" aria-label="展开导航" aria-expanded="false">
+      <span class="sidebar__brand"><span class="sidebar__brand-icon">K</span><span>N-KB</span></span>
+      <span class="sidebar__toggle-icon">›</span>
+    </button>
+    <nav class="sidebar__nav" aria-label="N-KB 导航">
+      <button class="sidebar__item sidebar__item--active" type="button" data-tab="overview"><span class="sidebar__item-icon">⌂</span><span class="sidebar__item-label">总览</span></button>
+      <button class="sidebar__item" type="button" data-tab="documents"><span class="sidebar__item-icon">□</span><span class="sidebar__item-label">文档</span></button>
+      <button class="sidebar__item" type="button" data-tab="retrieval"><span class="sidebar__item-icon">⌕</span><span class="sidebar__item-label">检索</span></button>
+      <button class="sidebar__item" type="button" data-tab="health"><span class="sidebar__item-icon">●</span><span class="sidebar__item-label">健康</span></button>
+    </nav>
+  </aside>
+
+  <header class="topbar">
+    <span class="topbar__title" id="topbar-title">总览</span>
+    <span class="last-update" id="last-update"></span>
+  </header>
+
+  <main class="main-content">
+    <div class="tab-content active" id="tab-overview">
+      <div class="stats-bar" id="overview-stats"></div>
+      <div class="status-grid">
+        <section class="status-panel">
+          <div class="panel-header">最近文档</div>
+          <div class="panel-body" id="overview-documents"></div>
+        </section>
+        <section class="status-panel">
+          <div class="panel-header">依赖摘要</div>
+          <div class="panel-body" id="overview-health"></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-documents">
+      <section class="status-panel">
+        <div class="panel-header">上传文档</div>
+        <div class="panel-body">
+          <form id="upload-form" class="form-grid">
+            <label>File <input id="upload-file" name="file" type="file" accept=".md,.txt,.markdown" required></label>
+            <label>Source <input id="upload-source" name="source" type="text" placeholder="Manual"></label>
+            <label>Tags <input id="upload-tags" name="tags" type="text" placeholder="topic=rag,kind=note"></label>
+            <button class="btn primary" type="submit">Upload</button>
+          </form>
+          <div id="upload-result" style="margin-top:12px;"></div>
+        </div>
+      </section>
+
+      <section class="status-panel">
+        <div class="panel-header">过滤文档</div>
+        <div class="panel-body form-grid">
+          <label>Filter tags <input id="filter-tags" type="text" placeholder="topic=rag"></label>
+          <label>Status <select id="filter-status"><option value="">全部</option><option value="uploaded">uploaded</option><option value="indexed">indexed</option><option value="failed">failed</option></select></label>
+          <button class="btn" id="refresh-documents" type="button">Refresh documents</button>
+        </div>
+      </section>
+
+      <div class="layout-two">
+        <section class="status-panel">
+          <div class="panel-header">文档列表</div>
+          <div class="panel-body" id="document-list"></div>
+        </section>
+        <div>
+          <section class="status-panel">
+            <div class="panel-header">文档详情</div>
+            <div class="panel-body" id="document-detail"></div>
+          </section>
+          <section class="status-panel">
+            <div class="panel-header">原文预览</div>
+            <div class="panel-body"><pre id="document-content"></pre></div>
+          </section>
+          <section class="status-panel">
+            <div class="panel-header">Chunk 可视化</div>
+            <div class="panel-body" id="document-chunks"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-retrieval">
+      <section class="status-panel">
+        <div class="panel-header">检索</div>
+        <div class="panel-body">
+          <form id="retrieval-form">
+            <label>Query <textarea id="retrieval-query" required></textarea></label>
+            <div class="form-grid" style="margin-top:12px;">
+              <label>Top K <input id="retrieval-top-k" type="number" min="1" value="5"></label>
+              <label>Min score <input id="retrieval-min-score" type="number" min="0" max="1" step="0.01" placeholder="0.3"></label>
+              <label>Filter tags <input id="retrieval-tags" type="text" placeholder="topic=rag"></label>
+              <label>Source kind <input id="retrieval-source-kind" type="text" placeholder="upload"></label>
+              <label>Document status <select id="retrieval-document-status"><option value="">全部</option><option value="uploaded">uploaded</option><option value="indexed">indexed</option><option value="failed">failed</option></select></label>
+              <button class="btn primary" type="submit">Search</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="status-panel">
+        <div class="panel-header">检索结果</div>
+        <div class="panel-body" id="retrieval-results"></div>
+      </section>
+    </div>
+
+    <div class="tab-content" id="tab-health">
+      <div class="stats-bar" id="health-stats"></div>
+      <section class="status-panel">
+        <div class="panel-header"><span>Dependency health</span><button class="btn" id="refresh-health" type="button">Refresh health</button></div>
+        <div class="panel-body" id="dependency-health"></div>
+      </section>
+    </div>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

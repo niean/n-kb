@@ -88,8 +88,9 @@ Docker Compose 项目隔离使用：
 - Qdrant REST：`6333:6333`
 - Qdrant gRPC：`6334:6334`
 - Ollama API：容器内默认 `11434`
+- Ollama+BGE-M3 本地 compose 运行通过一次性 bootstrap 服务拉取配置模型，业务服务依赖该服务成功完成后启动
 
-宿主机目录通过 `docker-compose.yml` volume 映射到容器路径，避免容器内状态丢失。本项目面向 Docker Desktop 本地访问时使用端口映射，不使用 `network_mode: host`。
+宿主机目录通过 `docker/docker-compose.yml` volume 映射到容器路径，避免容器内状态丢失。本项目面向 Docker Desktop 本地访问时使用端口映射，不使用 `network_mode: host`。
 
 ## 密钥
 
@@ -126,7 +127,7 @@ Docker Compose 项目隔离使用：
 
 ```bash
 python -m pytest -v
-docker compose config
+docker compose -f docker/docker-compose.yml config
 curl http://127.0.0.1:8212/health
 ```
 
@@ -139,7 +140,7 @@ curl http://127.0.0.1:8212/health
 - 文件名使用小写英文 kebab-case
 - Python 模块名使用 snake_case
 - `locals/`、`logs/`、`data/`、`.pytest_cache/`、`__pycache__/`、`*.pyc`、`*.egg-info/` 是本地运行、测试或构建缓存产物，应由 `.gitignore` 忽略，不需要提交
-- `docker-compose.yml` 可作为本地运行文件；如项目选择只提交 example，真实本地配置不得包含密钥
+- 部署相关文件统一放在 `docker/` 目录；真实本地配置不得包含密钥
 - `.harness/prd/` 是 AI-READONLY，不能自动修改
 - `.harness/knowledge/` 是实现后知识回填目标，可按 Harness 流程更新
 
@@ -154,3 +155,4 @@ curl http://127.0.0.1:8212/health
 - FE 使用安全文本渲染，不通过拼接 HTML 注入文档标题、标签、来源或检索片段
 - Shell、任意文件写入、远程抓取等能力不属于默认可公开能力，必须通过后续权限和风险控制设计启用
 - Docker Compose 挂载目录不应指向过大的敏感目录
+- Dockerfile 与 Compose 外部服务镜像应固定到具体版本或 digest；基础运行镜像优先使用 patch tag + sha256 digest

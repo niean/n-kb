@@ -39,5 +39,4 @@ data/*
 *.pyc
 *.egg-info/
 app/__pycache__
-docker/*
-
+docker/docker-compose.yml

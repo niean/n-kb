@@ -19,11 +19,13 @@
 
 `RetrievalQuery`（`app/domain/retrieval.py`）：检索请求领域对象，字段包括 query、filters、top_k、min_score。
 
+`RetrievalFilter`（`app/domain/retrieval.py`）：检索过滤条件，字段包括 tags、source_kind、document_status、min_score；min_score 未传入时不设置向量库阈值，显式传入时用于过滤低相关命中。
+
 `RetrievalResult`（`app/domain/retrieval.py`）：检索结果领域对象，字段包括 document_id、chunk_id、score、snippet、source、tags、metadata。
 
 ## 端口协议
 
-`DocumentRepository`：定义文档、来源、原文、标签和状态的读写接口。Infrastructure 的 SQLite 实现该端口。
+`DocumentRepository`：定义文档、来源、原文、标签、状态和删除的读写接口。Infrastructure 的 SQLite 实现该端口。
 
 `ChunkRepository`：定义 chunk 元数据读写接口。Infrastructure 的 SQLite 实现该端口。
 
@@ -35,9 +37,9 @@
 
 `TextSplitter`：定义文本切片接口。Infrastructure 可基于 LlamaIndex 或自有实现实现该端口。
 
-`EmbeddingProvider`：定义 embed_texts、embed_query 接口。Infrastructure 的 Ollama embedding provider 实现该端口。
+`EmbeddingProvider`：定义 embed_chunks、embed_query 接口。Infrastructure 的 Ollama embedding provider 实现该端口；chunk embedding 返回值必须保留 chunk_id 以校验向量与 chunk 对齐。
 
-`VectorIndex`：定义 upsert_chunks、delete_document、search 接口。Infrastructure 的 Qdrant 实现该端口。
+`VectorIndex`：定义 replace_document、search 接口。Infrastructure 的 Qdrant 实现该端口；replace_document 以 document_id 为边界替换该文档向量，空 chunk 列表表示清理该文档已有向量。
 
 ## 配置模型
 
@@ -94,11 +96,14 @@ Qdrant payload 应包含：
   "ordinal": 0,
   "text": "chunk text or bounded snippet source",
   "content_hash": "...",
+  "document_status": "indexed",
   "tags": {"category": "...", "project": "..."},
   "source_kind": "upload",
   "source_uri": "..."
 }
 ```
+
+Qdrant point id 必须使用 Qdrant 支持的无符号整数或 UUID；N-KB 使用由 chunk_id 派生的稳定 UUID 作为 point id，原始 chunk_id 保留在 payload 中供 API 返回和跨存储对齐。
 
 Qdrant payload 是 Infrastructure 存储细节，HTTP API 不直接返回原始 payload。
 
@@ -108,7 +113,8 @@ Interfaces 层请求和响应模型位于 `app/interfaces/http/`，仅作为外�
 
 - 上传接口接受文件、source、tags，不传入 Domain 之外的数据库字段
 - 文档管理接口返回文档、来源、标签、状态和原文
-- 检索接口接受 query、filters、top_k、min_score
+- chunk 查询接口 `GET /documents/{document_id}/chunks` 返回只读 chunk 列表，用于管理页可视化入库切分结果；响应字段包括 id、document_id、ordinal、text、token_count、metadata
+- 检索接口接受 query、filters、top_k、min_score，filters 可包含 tags、source_kind、document_status
 - 检索响应返回结构化 `RetrievalResult` 列表，不返回底层向量、SQLite row 或 Qdrant payload
 
 ## 文件存储边界
@@ -135,3 +141,4 @@ SQLite 是元数据权威来源；文件系统保存原始二进制或文本文�
 - Infrastructure 负责 SDK、SQLite、Qdrant、Ollama、LlamaIndex、文件系统细节
 - Interfaces 负责 HTTP 请求/响应和 FE 静态资源，不承载索引流程规则
 - 原文可通过管理 API 返回给本地 FE，但日志和错误消息不得输出完整原文
+- SQLite chunk 元数据更新与 Qdrant 向量替换必须保持一致；Qdrant 写入失败时恢复旧 chunk 元数据并将文档/任务标记失败

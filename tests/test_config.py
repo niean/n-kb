@@ -3,8 +3,24 @@ from pathlib import Path
 from app.config import Settings
 
 
-def test_settings_defaults_are_local_paths():
-    settings = Settings()
+N_KB_ENV_VARS = (
+    "N_KB_SQLITE_PATH",
+    "N_KB_STORAGE_ROOT",
+    "N_KB_QDRANT_URL",
+    "N_KB_QDRANT_COLLECTION",
+    "N_KB_EMBEDDING_BASE_URL",
+    "N_KB_EMBEDDING_MODEL",
+    "N_KB_INGESTION_BATCH_SIZE",
+    "N_KB_MAX_UPLOAD_BYTES",
+    "N_KB_ALLOWED_FILE_EXTENSIONS",
+)
+
+
+def test_settings_defaults_are_local_paths(monkeypatch):
+    for env_var in N_KB_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+
+    settings = Settings(_env_file=None)
 
     assert settings.sqlite_path == Path("locals/n-kb.db")
     assert settings.storage_root == Path("data")
@@ -28,7 +44,7 @@ def test_settings_reads_n_kb_prefixed_environment(monkeypatch):
     monkeypatch.setenv("N_KB_MAX_UPLOAD_BYTES", "4096")
     monkeypatch.setenv("N_KB_ALLOWED_FILE_EXTENSIONS", ".md,.txt")
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.sqlite_path == Path("locals/test.db")
     assert settings.storage_root == Path("tmp/storage")

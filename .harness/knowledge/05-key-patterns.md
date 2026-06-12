@@ -24,21 +24,26 @@ Application service 构造函数只接收 Domain 端口，不接收具体 SQLite
 7. Application 编排 parser/splitter/embedding/vector index 写入。
 8. Application 更新文档状态和任务状态。
 
+入库写向量前必须校验 chunk 数量、vector 数量和 chunk_id 对齐。重建或重新入库使用 `VectorIndex.replace_document(document_id, ...)` 按文档替换向量；Qdrant 写入失败时恢复 SQLite 中该文档旧 chunk 元数据。
+
 陷阱：上传成功不等于索引成功；文档状态和索引任务状态需要分开表达。
+
+删除文档流程：Interfaces 调用 `DocumentService.delete_document`；Application 先确认文档存在，再用 `VectorIndex.replace_document(document_id, [], [], {}, {})` 清理 Qdrant 向量，随后删除 ObjectStore 原文件和 SQLite 中 document/content/tags/chunks/index_jobs。
+
+陷阱：管理页面删除不能只隐藏列表项，必须调用 DELETE API 并刷新列表，避免 UI 与 SQLite/Qdrant 状态不一致。
 
 ## 模式三：语义检索
 
 检索流程：
 
 1. Interfaces 接收 query、filters、top_k、min_score。
-2. Application 构造 RetrievalQuery。
-3. Application 调用 EmbeddingProvider 生成 query 向量。
-4. Application 将标签过滤转换为 VectorIndex filter。
-5. VectorIndex 查询 Qdrant。
-6. Application 将命中结果转换为 RetrievalResult。
-7. Interfaces 返回稳定 JSON。
+2. Application 调用 EmbeddingProvider 生成 query 向量。
+3. Application 将标签过滤和可选 min_score 转换为 VectorIndex filter。
+4. VectorIndex 查询 Qdrant；显式 min_score 通过 score_threshold 过滤低相关命中。
+5. Application 将命中结果转换为 RetrievalResult。
+6. Interfaces 返回稳定 JSON。
 
-陷阱：Qdrant 原始 payload 不是 API 合约，不能直接透传。
+陷阱：Qdrant 原始 payload 不是 API 合约，不能直接透传；top_k 表示最多返回数量，不应由默认 score_threshold 截断，低相关过滤必须由调用方显式传入 min_score。
 
 ## 模式四：统一 key-value 标签
 
@@ -67,6 +72,7 @@ LlamaIndex 可用于解析、切分、索引辅助或 retriever 组合，但必�
 - `/health`：只验证 n-kb 进程可用。
 - `/health/dependencies`：验证 SQLite、Qdrant、Ollama embedding 依赖状态。
 - Application 依赖健康检查端口，Infrastructure 实现具体探测。
+- Ollama dependency health 必须确认配置的 embedding model 可用，例如 `bge-m3` 或等价 tag alias。
 
 陷阱：基础 `/health` 不应因为 Qdrant/Ollama 暂时不可用而导致容器被误判为不可启动。
 
@@ -80,6 +86,8 @@ Infrastructure 测试验证 SQLite schema、Qdrant adapter 请求转换、Ollama
 
 ## 模式八：FE 安全文本渲染
 
-FE 展示文档标题、原文、来源、标签和检索片段时使用 textContent 或框架安全渲染，不拼接 innerHTML。
+FE 展示文档标题、原文、来源、标签、chunk 文本和检索片段时使用 textContent 或框架安全渲染，不拼接 innerHTML。
 
-陷阱：Markdown 原文默认按文本展示；如果后续支持 Markdown 预览，必须引入 sanitizer。
+管理页采用 Dashboard-first 控制台：总览展示文档/入库/依赖状态，文档页负责上传、过滤、详情、原文和只读 chunk 可视化，检索页负责 query/top_k/min_score/过滤条件验证，健康页展示依赖状态。
+
+陷阱：Markdown 原文和 chunk 文本默认按文本展示；如果后续支持 Markdown 预览，必须引入 sanitizer。chunk 可视化是只读调试能力，不应在 FE 中直接编辑 SQLite/Qdrant 数据。
