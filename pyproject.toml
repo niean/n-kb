@@ -10,6 +10,7 @@ dependencies = [
     "python-multipart",
     "httpx",
     "qdrant-client",
+    "mcp",
 ]
 
 [project.optional-dependencies]

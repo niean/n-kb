@@ -36,6 +36,7 @@ N-KB 的目标是提供完整知识库产品能力：文档管理、来源管理
 - Metadata Store：通过 repository 端口屏蔽 SQLite schema 和 SQL 细节。
 - Management FE：服务本地文档上传、列表、详情、标签过滤、索引状态查看和检索验证。
 - Public HTTP API：服务 N-Agent 和其它调用方，提供稳定的文档、标签、入库、检索接口。
+- MCP Interface Adapter：作为 Interfaces 层协议适配，通过 FastMCP/Streamable HTTP 暴露检索 tool，复用 Application 层检索服务，不直接访问 Infrastructure；N-KB 只支持 MCP Streamable HTTP transport，不支持旧版 SSE transport。
 
 ## 服务边界
 

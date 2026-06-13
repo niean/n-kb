@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from app.infrastructure.persistence.sqlite_store import SQLiteStore
 from app.infrastructure.storage.local_object_store import LocalObjectStore
 from app.infrastructure.vector.qdrant_index import QdrantVectorIndex
 from app.interfaces.http.routes import register_routes
+from app.interfaces.mcp.server import create_mcp_app
 
 
 class _UnavailableQdrantClient:
@@ -74,8 +76,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         qdrant=vector_index,
         ollama=embedding_provider,
     )
+    mcp_server = None
+    mcp_app = None
+    if resolved_settings.mcp_enabled:
+        mcp_server, mcp_app = create_mcp_app(retrieval_service, resolved_settings)
 
-    fastapi_app = FastAPI(title="N-KB")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if mcp_server is None:
+            yield
+        else:
+            async with mcp_server.session_manager.run():
+                yield
+
+    fastapi_app = FastAPI(title="N-KB", lifespan=lifespan)
     fastapi_app.state.settings = resolved_settings
     fastapi_app.state.services = {
         "documents": document_service,
@@ -85,6 +99,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "health": health_service,
     }
     register_routes(fastapi_app)
+    if mcp_app is not None:
+        fastapi_app.mount(resolved_settings.mcp_path, mcp_app, name="mcp")
     static_root = Path(__file__).resolve().parent / "interfaces" / "http" / "static"
     fastapi_app.mount("/static", StaticFiles(directory=static_root), name="static")
     return fastapi_app

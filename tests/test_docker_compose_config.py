@@ -55,6 +55,17 @@ def test_docker_compose_declares_expected_services_ports_and_volumes(compose_fil
     for service in services.values():
         assert "network_mode" not in service
 
+    n_kb_environment = services["n-kb"]["environment"]
+    assert n_kb_environment["N_KB_MCP_ENABLED"] == "${N_KB_MCP_ENABLED:-false}"
+    assert n_kb_environment["N_KB_MCP_PATH"] == "${N_KB_MCP_PATH:-/mcp}"
+    assert n_kb_environment["N_KB_MCP_NAME"] == "${N_KB_MCP_NAME:-N-KB MCP}"
+    assert n_kb_environment["N_KB_MCP_ALLOWED_HOSTS"] == (
+        "${N_KB_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,*.localhost,*.localhost:*}"
+    )
+    assert n_kb_environment["N_KB_MCP_ALLOWED_ORIGINS"] == (
+        "${N_KB_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*,http://[::1]:*,http://*.localhost,http://*.localhost:*}"
+    )
+
     assert "../locals:/app/locals" in services["n-kb"]["volumes"]
     assert "../data:/app/data" in services["n-kb"]["volumes"]
     assert "/Users/niean/install/qdrant/storage:/qdrant/storage" in services["qdrant"]["volumes"]

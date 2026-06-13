@@ -45,6 +45,7 @@
 - 检索 API：`app/interfaces/http/retrieval.py`，实现语义检索接口
 - HTTP schema：`app/interfaces/http/schemas.py`，定义稳定请求/响应模型和检索输入边界
 - HTTP 错误映射：`app/interfaces/http/errors.py`，将应用错误转换为安全、稳定的错误 payload
+- MCP 检索适配：`app/interfaces/mcp/server.py`，使用 FastMCP Streamable HTTP 暴露 `search_knowledge` tool，只支持 `streamable_http` 不支持 `sse`，复用 `RetrievalService.search` 并过滤公开结果
 - FE 静态页面入口：`app/interfaces/http/static/index.html`，定义 Dashboard-first 管理页 app shell、sidebar、topbar 和总览/文档/检索/健康容器
 - FE 视觉样式：`app/interfaces/http/static/styles.css`，定义管理页 Design Token、布局、表单、按钮、Badge、状态和导航样式
 - FE API 模块：`app/interfaces/http/static/management-api.js`，封装管理页 HTTP API 调用，不直接访问后端基础设施
@@ -74,6 +75,7 @@
 - Qdrant adapter 测试：`tests/infrastructure/test_qdrant_index.py`
 - Ollama provider 测试：`tests/infrastructure/test_ollama_provider.py`
 - HTTP API 测试：`tests/interfaces/test_health_api.py`、`tests/interfaces/test_documents_api.py`、`tests/interfaces/test_retrieval_api.py`
+- MCP 接口测试：`tests/interfaces/test_mcp_server.py`，覆盖 MCP tool 复用检索服务、输入校验、错误遮蔽、tool 暴露范围和 FastAPI 挂载
 - FE 安全渲染测试：`tests/interfaces/test_management_fe.py`
 
 ## Harness 任务文件
