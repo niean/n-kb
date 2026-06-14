@@ -60,10 +60,10 @@ def test_docker_compose_declares_expected_services_ports_and_volumes(compose_fil
     assert n_kb_environment["N_KB_MCP_PATH"] == "${N_KB_MCP_PATH:-/mcp}"
     assert n_kb_environment["N_KB_MCP_NAME"] == "${N_KB_MCP_NAME:-N-KB MCP}"
     assert n_kb_environment["N_KB_MCP_ALLOWED_HOSTS"] == (
-        "${N_KB_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,*.localhost,*.localhost:*}"
+        "${N_KB_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,*.localhost,*.localhost:*,n-kb,n-kb:*}"
     )
     assert n_kb_environment["N_KB_MCP_ALLOWED_ORIGINS"] == (
-        "${N_KB_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*,http://[::1]:*,http://*.localhost,http://*.localhost:*}"
+        "${N_KB_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*,http://[::1]:*,http://*.localhost,http://*.localhost:*,http://n-kb,http://n-kb:*}"
     )
 
     assert "../locals:/app/locals" in services["n-kb"]["volumes"]

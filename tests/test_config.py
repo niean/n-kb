@@ -45,6 +45,8 @@ def test_settings_defaults_are_local_paths(monkeypatch):
         "[::1]:*",
         "*.localhost",
         "*.localhost:*",
+        "n-kb",
+        "n-kb:*",
     ]
     assert settings.mcp_allowed_origins == [
         "http://127.0.0.1:*",
@@ -52,6 +54,8 @@ def test_settings_defaults_are_local_paths(monkeypatch):
         "http://[::1]:*",
         "http://*.localhost",
         "http://*.localhost:*",
+        "http://n-kb",
+        "http://n-kb:*",
     ]
 
 

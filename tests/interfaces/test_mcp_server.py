@@ -171,6 +171,7 @@ def test_create_app_mounts_mcp_when_enabled():
     ("host", "origin"),
     [
         ("127.0.0.1:80", "http://127.0.0.1:80"),
+        ("n-kb:8212", "http://n-kb:8212"),
         ("nkb.localhost", "http://nkb.localhost"),
         ("abc.localhost:8212", "http://abc.localhost:8212"),
     ],

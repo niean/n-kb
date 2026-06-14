@@ -30,6 +30,8 @@ class Settings(BaseSettings):
         "[::1]:*",
         "*.localhost",
         "*.localhost:*",
+        "n-kb",
+        "n-kb:*",
     ]
     mcp_allowed_origins: Annotated[list[str], NoDecode] = [
         "http://127.0.0.1:*",
@@ -37,6 +39,8 @@ class Settings(BaseSettings):
         "http://[::1]:*",
         "http://*.localhost",
         "http://*.localhost:*",
+        "http://n-kb",
+        "http://n-kb:*",
     ]
 
     @field_validator("allowed_file_extensions", mode="before")
