@@ -93,7 +93,7 @@ def test_management_fe_contains_required_sections_and_script():
     assert "retrieval-form" in html
     assert "retrieval-min-score" in html
     assert 'value="0.5"' in html
-    assert "总览" in html
+    assert "概览" in html
     assert "文档" in html
     assert "检索" in html
     assert "健康" in html

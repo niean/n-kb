@@ -46,7 +46,7 @@
 - HTTP schema：`app/interfaces/http/schemas.py`，定义稳定请求/响应模型和检索输入边界
 - HTTP 错误映射：`app/interfaces/http/errors.py`，将应用错误转换为安全、稳定的错误 payload
 - MCP 检索适配：`app/interfaces/mcp/server.py`，使用 FastMCP Streamable HTTP 暴露 `search_knowledge` tool，只支持 `streamable_http` 不支持 `sse`，复用 `RetrievalService.search` 并过滤公开结果
-- FE 静态页面入口：`app/interfaces/http/static/index.html`，定义 Dashboard-first 管理页 app shell、sidebar、topbar 和总览/文档/检索/健康容器
+- FE 静态页面入口：`app/interfaces/http/static/index.html`，定义 Dashboard-first 管理页 app shell、sidebar、topbar 和概览/文档/检索/健康容器
 - FE 视觉样式：`app/interfaces/http/static/styles.css`，定义管理页 Design Token、布局、表单、按钮、Badge、状态和导航样式
 - FE API 模块：`app/interfaces/http/static/management-api.js`，封装管理页 HTTP API 调用，不直接访问后端基础设施
 - FE UI 工具模块：`app/interfaces/http/static/management-ui.js`，封装安全文本渲染、Badge、空/加载/错误状态和标签解析 helper
