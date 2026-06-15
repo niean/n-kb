@@ -43,8 +43,8 @@ def test_settings_defaults_are_local_paths(monkeypatch):
         "127.0.0.1:*",
         "localhost:*",
         "[::1]:*",
-        "*.localhost",
-        "*.localhost:*",
+        "nkb.localhost",
+        "nkb.localhost:*",
         "n-kb",
         "n-kb:*",
     ]
@@ -52,8 +52,8 @@ def test_settings_defaults_are_local_paths(monkeypatch):
         "http://127.0.0.1:*",
         "http://localhost:*",
         "http://[::1]:*",
-        "http://*.localhost",
-        "http://*.localhost:*",
+        "http://nkb.localhost",
+        "http://nkb.localhost:*",
         "http://n-kb",
         "http://n-kb:*",
     ]

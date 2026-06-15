@@ -1,11 +1,10 @@
 from typing import Any
-from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import Response
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.responses import JSONResponse
 
+from app.application.health_service import HealthService
 from app.application.retrieval_service import RetrievalService
 from app.config import Settings
 from app.domain.retrieval import RetrievalFilter, RetrievalResult
@@ -23,63 +22,41 @@ def retrieval_result_to_public_dict(result: RetrievalResult) -> dict[str, Any]:
     }
 
 
-def host_matches(value: str, allowed: str) -> bool:
-    if value == allowed:
-        return True
-    if allowed == "*.localhost":
-        return value.endswith(".localhost") and value != "localhost"
-    if allowed == "*.localhost:*":
-        host, separator, _port = value.partition(":")
-        return bool(separator) and host_matches(host, "*.localhost")
-    if allowed.endswith(":*"):
-        return value.startswith(f"{allowed[:-2]}:")
-    return False
+def mcp_status_payload(health_service: HealthService) -> dict[str, Any]:
+    return {
+        "status": health_service.process_health()["status"],
+        "components": health_service.dependency_health(),
+    }
 
 
-def origin_matches(value: str, allowed: str) -> bool:
-    parsed_value = urlsplit(value)
-    parsed_allowed = urlsplit(allowed)
-    if not parsed_value.scheme or not parsed_value.netloc:
-        return False
-    if parsed_value.scheme != parsed_allowed.scheme:
-        return False
-    return host_matches(parsed_value.netloc, parsed_allowed.netloc)
+def create_mcp_status_endpoint(health_service: HealthService):
+    async def status_endpoint():
+        return JSONResponse(mcp_status_payload(health_service))
+
+    return status_endpoint
 
 
-class McpTransportSecurityMiddleware:
-    def __init__(self, app: ASGIApp, allowed_hosts: list[str], allowed_origins: list[str]) -> None:
-        self.app = app
-        self.allowed_hosts = allowed_hosts
-        self.allowed_origins = allowed_origins
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope["headers"]}
-        if not any(host_matches(headers.get("host", ""), allowed) for allowed in self.allowed_hosts):
-            await Response("Invalid Host header", status_code=421)(scope, receive, send)
-            return
-
-        origin = headers.get("origin")
-        if origin and not any(origin_matches(origin, allowed) for allowed in self.allowed_origins):
-            await Response("Invalid Origin header", status_code=403)(scope, receive, send)
-            return
-
-        await self.app(scope, receive, send)
-
-
-def create_mcp_server(retrieval_service: RetrievalService, settings: Settings) -> FastMCP:
-    server = FastMCP(
+def create_mcp_server(
+    retrieval_service: RetrievalService,
+    health_service: HealthService,
+    settings: Settings,
+) -> FastMCP:
+    mcp = FastMCP(
         settings.mcp_name,
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=settings.mcp_allowed_hosts,
+            allowed_origins=settings.mcp_allowed_origins,
+        ),
     )
 
-    @server.tool(structured_output=True)
+    @mcp.tool(
+        description="检索 N-KB 知识库，按查询文本、标签、来源类型和文档状态返回相关知识片段。",
+        structured_output=True,
+    )
     def search_knowledge(
         query: str,
         top_k: int = 5,
@@ -110,13 +87,28 @@ def create_mcp_server(retrieval_service: RetrievalService, settings: Settings) -
             "results": [retrieval_result_to_public_dict(result) for result in results],
         }
 
-    return server
+    @mcp.tool(
+        description="查询 N-KB 服务进程和 SQLite、Qdrant、Ollama 等依赖组件的健康状态。",
+        structured_output=True,
+    )
+    def status() -> dict[str, Any]:
+        try:
+            return mcp_status_payload(health_service)
+        except Exception:
+            raise RuntimeError("infrastructure_error") from None
+
+    return mcp
 
 
-def create_mcp_app(retrieval_service: RetrievalService, settings: Settings):
-    server = create_mcp_server(retrieval_service, settings)
-    return server, McpTransportSecurityMiddleware(
+def create_mcp_app(
+    retrieval_service: RetrievalService,
+    health_service: HealthService,
+    settings: Settings,
+):
+    server = create_mcp_server(retrieval_service, health_service, settings)
+
+    return (
+        server,
         server.streamable_http_app(),
-        settings.mcp_allowed_hosts,
-        settings.mcp_allowed_origins,
+        create_mcp_status_endpoint(health_service),
     )

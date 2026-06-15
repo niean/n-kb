@@ -73,6 +73,13 @@
 - `N_KB_EMBEDDING_MODEL`
 - `N_KB_INGESTION_BATCH_SIZE`
 - `N_KB_MAX_UPLOAD_BYTES`
+- `N_KB_MCP_ENABLED`
+- `N_KB_MCP_PATH`
+- `N_KB_MCP_NAME`
+- `N_KB_MCP_ALLOWED_HOSTS`
+- `N_KB_MCP_ALLOWED_ORIGINS`
+
+MCP allowed hosts/origins 遵循 MCP SDK `TransportSecuritySettings` 原生匹配语义：支持精确匹配和 `:*` 端口通配，不支持项目自定义 `*.localhost` 子域通配。
 
 Docker Compose 项目隔离使用：
 

@@ -28,8 +28,8 @@ class Settings(BaseSettings):
         "127.0.0.1:*",
         "localhost:*",
         "[::1]:*",
-        "*.localhost",
-        "*.localhost:*",
+        "nkb.localhost",
+        "nkb.localhost:*",
         "n-kb",
         "n-kb:*",
     ]
@@ -37,8 +37,8 @@ class Settings(BaseSettings):
         "http://127.0.0.1:*",
         "http://localhost:*",
         "http://[::1]:*",
-        "http://*.localhost",
-        "http://*.localhost:*",
+        "http://nkb.localhost",
+        "http://nkb.localhost:*",
         "http://n-kb",
         "http://n-kb:*",
     ]

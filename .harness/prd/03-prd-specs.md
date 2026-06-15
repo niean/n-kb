@@ -25,6 +25,9 @@
 - FR
   - 检索：提供标准的MCP接口。在此之前，制定MCP规范标准，如使用的代码框架等，尽量复用流行开源方案
 
+[20260615]
+  - 接口：MCP，改用标准的代码库（替代裸写），参考n-agent /Users/niean/code/github.com/niean/n-agent
+
 ---
 
 [待办]

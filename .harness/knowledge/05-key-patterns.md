@@ -45,13 +45,13 @@ Application service 构造函数只接收 Domain 端口，不接收具体 SQLite
 
 陷阱：Qdrant 原始 payload 不是 API 合约，不能直接透传；top_k 表示最多返回数量，不应由默认 score_threshold 截断，低相关过滤必须由调用方显式传入 min_score。
 
-## 模式四：MCP 检索接口
+## 模式四：MCP 接口
 
-MCP 检索接口是 Interfaces 层协议适配，不是独立检索实现。FastMCP server 通过配置开关挂载到现有 FastAPI 应用，tool 入参转换为 `RetrievalFilter` 后调用同一个 `RetrievalService.search()`。
+MCP 接口是 Interfaces 层协议适配，不是独立检索或健康检查实现。FastMCP server 通过配置开关挂载到现有 FastAPI 应用，`search_knowledge` tool 入参转换为 `RetrievalFilter` 后调用同一个 `RetrievalService.search()`；`status` tool 复用 `HealthService`。应用入口提供两个独立站点：`/mcp`（MCP Streamable HTTP 协议站点）和 `/mcp/status`（组件状态站点，由 FastAPI 精确路由承载）。
 
-N-KB MCP 只支持 MCP Streamable HTTP transport，不支持旧版 SSE transport。MCP client 配置必须使用 `streamable_http`，不能使用 `sse`。
+N-KB MCP 只支持 MCP Streamable HTTP transport，不支持旧版 SSE transport。MCP client 配置必须使用 `streamable_http`，不能使用 `sse`。MCP Streamable HTTP 的 Host/Origin/Content-Type 校验使用 FastMCP 标准 `TransportSecuritySettings`，不要在项目内手写 Host/Origin matcher 或 transport security middleware。
 
-MCP adapter 不得 import Infrastructure、Qdrant、Ollama、SQLite 或 LlamaIndex，不得重复实现 embedding、vector search 或排序逻辑。返回给 MCP client 的结构化结果与 HTTP 检索公开字段保持一致，并过滤底层 `vector` 元数据。
+MCP adapter 不得 import Infrastructure、Qdrant、Ollama、SQLite 或 LlamaIndex，不得重复实现 embedding、vector search、排序或依赖探测逻辑。返回给 MCP client 的结构化检索结果与 HTTP 检索公开字段保持一致，并过滤底层 `vector` 元数据。
 
 FastMCP Streamable HTTP 挂载到父 FastAPI 时，session manager 需要由父应用 lifespan 管理，不能只依赖 mounted 子应用自身 lifespan。
 

@@ -78,8 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     mcp_server = None
     mcp_app = None
+    mcp_status_app = None
     if resolved_settings.mcp_enabled:
-        mcp_server, mcp_app = create_mcp_app(retrieval_service, resolved_settings)
+        mcp_server, mcp_app, mcp_status_app = create_mcp_app(retrieval_service, health_service, resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -99,7 +100,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "health": health_service,
     }
     register_routes(fastapi_app)
-    if mcp_app is not None:
+    if mcp_app is not None and mcp_status_app is not None:
+        fastapi_app.add_api_route(
+            f"{resolved_settings.mcp_path}/status",
+            mcp_status_app,
+            methods=["GET"],
+            name="mcp-status",
+        )
         fastapi_app.mount(resolved_settings.mcp_path, mcp_app, name="mcp")
     static_root = Path(__file__).resolve().parent / "interfaces" / "http" / "static"
     fastapi_app.mount("/static", StaticFiles(directory=static_root), name="static")
