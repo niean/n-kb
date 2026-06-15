@@ -27,6 +27,7 @@
 
 [20260615]
   - 接口：MCP，改用标准的代码库（替代裸写），参考n-agent /Users/niean/code/github.com/niean/n-agent
+  - 接口：MCP，支持stdio传输类型
 
 ---
 

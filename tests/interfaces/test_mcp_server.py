@@ -176,6 +176,13 @@ def mounted_paths(app):
     return [route.path for route in app.routes if isinstance(route, Mount)]
 
 
+def test_create_app_service_registry_remains_available():
+    app = create_app(Settings(_env_file=None, mcp_enabled=False))
+
+    assert set(app.state.services) == {"documents", "ingestion", "index_jobs", "retrieval", "health"}
+
+
+
 def test_create_app_does_not_mount_mcp_when_disabled():
     app = create_app(Settings(_env_file=None, mcp_enabled=False))
 
@@ -306,3 +313,42 @@ def test_mcp_status_endpoint_is_not_available_when_disabled():
         response = client.get("/mcp/status")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_exposes_existing_mcp_tools(monkeypatch):
+    from app import mcp_stdio
+
+    class Services:
+        retrieval = FakeRetrievalService()
+        health = FakeHealthService()
+
+    monkeypatch.setattr(mcp_stdio, "build_services", lambda settings: Services())
+
+    server = mcp_stdio.create_stdio_server(Settings(_env_file=None))
+    tools = await server.list_tools()
+
+    assert [tool.name for tool in tools] == ["search_knowledge", "status"]
+
+
+def test_stdio_main_runs_stdio_transport(monkeypatch):
+    from app import mcp_stdio
+
+    class Server:
+        call = None
+
+        def run(self, transport="stdio"):
+            self.call = transport
+
+    server = Server()
+    monkeypatch.setattr(mcp_stdio, "create_stdio_server", lambda: server)
+
+    mcp_stdio.main()
+
+    assert server.call == "stdio"
+
+
+def test_stdio_module_entrypoint_exports_main():
+    from app.interfaces.mcp import stdio
+
+    assert stdio.main is not None
