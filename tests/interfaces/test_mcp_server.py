@@ -1,37 +1,14 @@
-from dataclasses import asdict
-
 import pytest
 from fastapi.routing import Mount
 from fastapi.testclient import TestClient
-from mcp.server.fastmcp.exceptions import ToolError
 
 from app.config import Settings
-from app.domain.retrieval import RetrievalResult
 from app.main import create_app
-from app.interfaces.mcp.server import create_mcp_server, retrieval_result_to_public_dict
+from app.interfaces.mcp.server import create_mcp_server
 
 
 def structured_tool_result(result):
     return result[1]
-
-
-class FakeRetrievalService:
-    def __init__(self):
-        self.call = None
-
-    def search(self, query, filters=None, top_k=5):
-        self.call = {"query": query, "filters": filters, "top_k": top_k}
-        return [
-            RetrievalResult(
-                document_id="doc-1",
-                chunk_id="chunk-1",
-                score=0.91,
-                snippet="safe snippet",
-                source={"kind": "upload", "uri": "note.md"},
-                tags={"topic": "rag"},
-                metadata={"ordinal": 0, "vector": [1.0, 2.0]},
-            )
-        ]
 
 
 class FakeHealthService:
@@ -47,107 +24,10 @@ class FakeHealthService:
 
 
 
-def test_retrieval_result_public_mapping_removes_vector():
-    result = RetrievalResult(
-        document_id="doc-1",
-        chunk_id="chunk-1",
-        score=0.91,
-        snippet="safe snippet",
-        source={"kind": "upload", "uri": "note.md"},
-        tags={"topic": "rag"},
-        metadata={"ordinal": 0, "vector": [1.0, 2.0]},
-    )
-
-    assert retrieval_result_to_public_dict(result) == {
-        "document_id": "doc-1",
-        "chunk_id": "chunk-1",
-        "score": 0.91,
-        "snippet": "safe snippet",
-        "source": {"kind": "upload", "uri": "note.md"},
-        "tags": {"topic": "rag"},
-        "metadata": {"ordinal": 0},
-    }
-
-
-@pytest.mark.asyncio
-async def test_search_knowledge_tool_uses_retrieval_service():
-    service = FakeRetrievalService()
-    server = create_mcp_server(service, FakeHealthService(), Settings(_env_file=None))
-
-    result = await server.call_tool(
-        "search_knowledge",
-        {
-            "query": "what is rag",
-            "top_k": 3,
-            "min_score": 0.5,
-            "tags": {"topic": "rag"},
-            "source_kind": "upload",
-            "document_status": "indexed",
-        },
-    )
-
-    assert service.call["query"] == "what is rag"
-    assert service.call["top_k"] == 3
-    assert asdict(service.call["filters"]) == {
-        "tags": {"topic": "rag"},
-        "source_kind": "upload",
-        "document_status": "indexed",
-        "min_score": 0.5,
-    }
-    assert structured_tool_result(result) == {
-        "query": "what is rag",
-        "results": [
-            {
-                "document_id": "doc-1",
-                "chunk_id": "chunk-1",
-                "score": 0.91,
-                "snippet": "safe snippet",
-                "source": {"kind": "upload", "uri": "note.md"},
-                "tags": {"topic": "rag"},
-                "metadata": {"ordinal": 0},
-            }
-        ],
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"query": "", "top_k": 5, "min_score": 0.5},
-        {"query": "x", "top_k": 0, "min_score": 0.5},
-        {"query": "x", "top_k": 51, "min_score": 0.5},
-        {"query": "x", "top_k": 5, "min_score": -0.1},
-        {"query": "x", "top_k": 5, "min_score": 1.1},
-    ],
-)
-async def test_search_knowledge_tool_validates_input(arguments):
-    server = create_mcp_server(FakeRetrievalService(), FakeHealthService(), Settings(_env_file=None))
-
-    with pytest.raises(ToolError):
-        await server.call_tool("search_knowledge", arguments)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error", [RuntimeError("qdrant host secret"), OSError("ollama host secret")])
-async def test_search_knowledge_tool_masks_runtime_errors(error):
-    class FailingRetrievalService(FakeRetrievalService):
-        def search(self, query, filters=None, top_k=5):
-            raise error
-
-    server = create_mcp_server(FailingRetrievalService(), FakeHealthService(), Settings(_env_file=None))
-
-    with pytest.raises(ToolError) as exc_info:
-        await server.call_tool("search_knowledge", {"query": "rag"})
-
-    assert "infrastructure_error" in str(exc_info.value)
-    assert "qdrant host secret" not in str(exc_info.value)
-    assert "ollama host secret" not in str(exc_info.value)
-
 
 @pytest.mark.asyncio
 async def test_status_tool_uses_health_service():
-    server = create_mcp_server(FakeRetrievalService(), FakeHealthService(), Settings(_env_file=None))
+    server = create_mcp_server(FakeHealthService(), Settings(_env_file=None))
 
     result = await server.call_tool("status", {})
 
@@ -162,14 +42,13 @@ async def test_status_tool_uses_health_service():
 
 
 @pytest.mark.asyncio
-async def test_mcp_server_only_exposes_search_and_status_tools():
-    server = create_mcp_server(FakeRetrievalService(), FakeHealthService(), Settings(_env_file=None))
+async def test_mcp_server_only_exposes_status_tool():
+    server = create_mcp_server(FakeHealthService(), Settings(_env_file=None))
 
     tools = await server.list_tools()
 
-    assert [tool.name for tool in tools] == ["search_knowledge", "status"]
-    assert tools[0].description == "检索 N-KB 知识库，按查询文本、标签、来源类型和文档状态返回相关知识片段。"
-    assert tools[1].description == "查询 N-KB 服务进程和 SQLite、Qdrant、Ollama 等依赖组件的健康状态。"
+    assert [tool.name for tool in tools] == ["status"]
+    assert tools[0].description == "查询 N-KB 服务进程和 SQLite、Qdrant、Ollama 等依赖组件的健康状态。"
 
 
 def mounted_paths(app):
@@ -320,7 +199,6 @@ async def test_stdio_server_exposes_existing_mcp_tools(monkeypatch):
     from app import mcp_stdio
 
     class Services:
-        retrieval = FakeRetrievalService()
         health = FakeHealthService()
 
     monkeypatch.setattr(mcp_stdio, "build_services", lambda settings: Services())
@@ -328,7 +206,7 @@ async def test_stdio_server_exposes_existing_mcp_tools(monkeypatch):
     server = mcp_stdio.create_stdio_server(Settings(_env_file=None))
     tools = await server.list_tools()
 
-    assert [tool.name for tool in tools] == ["search_knowledge", "status"]
+    assert [tool.name for tool in tools] == ["status"]
 
 
 def test_stdio_main_runs_stdio_transport(monkeypatch):

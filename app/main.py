@@ -18,7 +18,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mcp_status_app = None
     if resolved_settings.mcp_enabled:
         mcp_server, mcp_app, mcp_status_app = create_mcp_app(
-            services.retrieval,
             services.health,
             resolved_settings,
         )

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # restart
-docker compose stop n-kb
+docker compose down n-kb
 docker compose rm -f n-kb
 docker compose up -d --build --force-recreate  --remove-orphans n-kb
 echo
