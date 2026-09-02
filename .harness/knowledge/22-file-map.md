@@ -51,7 +51,7 @@
 - FE 视觉样式：`app/interfaces/http/static/styles.css`，定义管理页 Design Token、布局、表单、按钮、Badge、状态和导航样式
 - FE API 模块：`app/interfaces/http/static/management-api.js`，封装管理页 HTTP API 调用，不直接访问后端基础设施
 - FE UI 工具模块：`app/interfaces/http/static/management-ui.js`，封装安全文本渲染、Badge、空/加载/错误状态和标签解析 helper
-- FE 导航模块：`app/interfaces/http/static/management-navigation.js`，管理 sidebar 展开、hash 路由、导航高亮和顶栏标题同步
+- FE 导航模块：`app/interfaces/http/static/management-navigation.js`，管理 sidebar 展开、hash 路由、导航高亮、顶栏标题同步和 localStorage 折叠偏好（key `nkb.sidebar.expanded`）
 - FE 页面入口脚本：`app/interfaces/http/static/app.js`，编排文档、检索、健康页面渲染和事件绑定
 
 ## Docker 与部署
@@ -64,6 +64,7 @@
 ## 测试
 
 - 配置测试：`tests/test_config.py`
+- 依赖版本约束测试：`tests/test_dependencies.py`，约束 `pyproject.toml` 中关键依赖的版本范围，避免上游破坏性升级导致镜像构建后容器无法启动
 - DDD 边界测试：`tests/test_architecture_boundaries.py`
 - Docker Compose 配置测试：`tests/test_docker_compose_config.py`
 - Domain 模型测试：`tests/domain/test_models.py`
@@ -81,7 +82,10 @@
 
 ## Harness 任务文件
 
+- Harness 运行配置：`.harness/harness.json`，启用 Codex 三方审阅与 after-finish Hook，并定义模型和超时等运行值
+- Workflow 收尾 Hook：`.harness/hooks/after-finish.sh`，在受支持 Workflow 成功结束后调用现有 `docker/restart.sh`
 - 设计 spec：`.harness/specs/active/`
+- 人工端到端验收清单：`.harness/specs/verify/`
 - 实现 plan：`.harness/plans/active/`
 - 架构知识：`.harness/knowledge/02-architecture.md`
 - 关键模式：`.harness/knowledge/05-key-patterns.md`

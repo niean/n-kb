@@ -1,9 +1,21 @@
+import re
 from pathlib import Path
 
 from app.main import create_app
 
 
 STATIC_ROOT = Path(__file__).resolve().parents[2] / "app" / "interfaces" / "http" / "static"
+
+
+def _css_rule(css: str, selector: str) -> str:
+    match = re.search(rf"{re.escape(selector)}\s*\{{(?P<body>[^}}]*)\}}", css)
+    assert match is not None, f"missing CSS rule: {selector}"
+    return match.group("body")
+
+
+def _css_declarations(css: str, selector: str) -> list[str]:
+    body = _css_rule(css, selector)
+    return [part.strip() for part in body.split(";") if part.strip()]
 
 
 def test_static_management_files_exist_and_app_mounts_static_files(tmp_path):
@@ -305,3 +317,251 @@ def test_management_js_keeps_document_list_compact_and_detail_metadata_complete(
     assert "入库成功" in js
     assert "未入库" in js
     assert "入库失败" in js
+
+
+def test_management_sidebar_defaults_expanded_and_guards_first_paint():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    body_open = '<body class="sidebar-expanded">'
+    guard_read = "localStorage.getItem('nkb.sidebar.expanded')"
+    sidebar = 'id="app-sidebar"'
+    head = html[html.index("<head>") : html.index("</head>")]
+
+    toggle_start = html.index('id="sidebar-toggle"')
+    toggle = html[toggle_start : html.index("</button>", toggle_start)]
+
+    assert body_open in html
+    assert 'aria-expanded="true"' in toggle
+    assert html.index(body_open) < html.index(guard_read) < html.index(sidebar)
+    assert guard_read not in head
+
+
+def test_management_first_paint_guard_uses_only_zero_as_collapsed():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert "v!=='0'" in html
+    assert "classList.toggle('sidebar-expanded',v!=='0')" in html
+    assert "classList.add('sidebar-expanded')" in html
+
+
+def test_management_sidebar_css_supports_column_layout_and_nav_scrolling():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+    sidebar = _css_rule(css, ".sidebar")
+    toggle = _css_rule(css, ".sidebar__toggle")
+    nav = _css_rule(css, ".sidebar__nav")
+
+    assert "display: flex" in sidebar
+    assert "flex-direction: column" in sidebar
+    assert "flex: 0 0 auto" in toggle
+    for declaration in [
+        "flex: 1 1 auto",
+        "min-height: 0",
+        "overflow-x: hidden",
+        "overflow-y: auto",
+        "scrollbar-width: thin",
+        "scrollbar-color: var(--color-border-default) transparent",
+    ]:
+        assert declaration in nav
+    assert "width: 6px" in _css_rule(css, ".sidebar__nav::-webkit-scrollbar")
+    thumb = _css_rule(css, ".sidebar__nav::-webkit-scrollbar-thumb")
+    assert "background: var(--color-border-default)" in thumb
+    assert "border-radius: 3px" in thumb
+    assert "background: transparent" in _css_rule(css, ".sidebar__nav::-webkit-scrollbar-track")
+
+
+def test_management_content_width_rules_match_reference_declarations():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    collapsed = _css_declarations(css, ".topbar, .main-content")
+    expanded = _css_declarations(
+        css,
+        "body.sidebar-expanded .topbar, body.sidebar-expanded .main-content",
+    )
+
+    assert collapsed == [
+        "width: calc(100vw - var(--sidebar-width-collapsed))",
+        "margin-left: var(--sidebar-width-collapsed)",
+        "transition: margin-left 0.2s ease, width 0.2s ease",
+    ]
+    assert expanded == [
+        "width: calc(100vw - var(--sidebar-width-expanded))",
+        "margin-left: var(--sidebar-width-expanded)",
+    ]
+    assert all("max-width" not in declaration for declaration in collapsed + expanded)
+
+
+def test_management_sidebar_rule_matches_reference_declarations():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert _css_declarations(css, ".sidebar") == [
+        "position: fixed",
+        "inset: 0 auto 0 0",
+        "z-index: 10",
+        "display: flex",
+        "flex-direction: column",
+        "width: var(--sidebar-width-collapsed)",
+        "overflow: hidden",
+        "background: var(--color-bg-white)",
+        "border-right: 1px solid var(--color-sidebar-border)",
+        "box-shadow: var(--shadow-sidebar)",
+        "transition: width var(--motion-fast)",
+    ]
+    assert _css_declarations(css, "body.sidebar-expanded .sidebar") == [
+        "width: var(--sidebar-width-expanded)"
+    ]
+
+
+def test_management_sidebar_nav_rule_matches_local_reference_contract():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert _css_declarations(css, ".sidebar__nav") == [
+        "display: flex",
+        "flex-direction: column",
+        "gap: 4px",
+        "padding: 8px 6px",
+        "flex: 1 1 auto",
+        "min-height: 0",
+        "overflow-x: hidden",
+        "overflow-y: auto",
+        "scrollbar-width: thin",
+        "scrollbar-color: var(--color-border-default) transparent",
+    ]
+
+
+def test_management_sidebar_alignment_preserves_local_contracts():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+    root = _css_declarations(css, ":root")
+    main = _css_declarations(css, ".main-content")
+    sidebar_item = _css_declarations(css, ".sidebar__item")
+    topbar = _css_declarations(css, ".topbar")
+
+    assert "--sidebar-width-collapsed: 64px" in root
+    assert "--sidebar-width-expanded: 200px" in root
+    assert "min-width: 0" in main
+    assert "padding: 20px" in main
+    for declaration in [
+        "font-size: var(--font-size-md)",
+        "text-align: left",
+        "cursor: pointer",
+    ]:
+        assert declaration in sidebar_item
+    assert "justify-content: space-between" in topbar
+    assert "gap: var(--space-6)" not in topbar
+    assert _css_declarations(css, ".sidebar__nav::-webkit-scrollbar") == [
+        "width: 6px"
+    ]
+    assert _css_declarations(css, ".sidebar__nav::-webkit-scrollbar-thumb") == [
+        "background: var(--color-border-default)",
+        "border-radius: 3px",
+    ]
+    assert _css_declarations(css, ".sidebar__nav::-webkit-scrollbar-track") == [
+        "background: transparent"
+    ]
+    assert _css_declarations(css, ".sidebar__item-icon") == [
+        "display: inline-flex",
+        "align-items: center",
+        "justify-content: center",
+        "width: 28px",
+        "height: 28px",
+    ]
+    assert _css_declarations(css, ".sidebar__item-icon svg") == [
+        "width: 24px",
+        "height: 24px",
+        "stroke: currentColor",
+    ]
+    assert _css_declarations(css, ".sidebar__toggle-icon svg") == [
+        "width: 24px",
+        "height: 24px",
+        "stroke: currentColor",
+    ]
+    assert "gap: 12px" in sidebar_item
+    assert "padding: 12px 10px" in sidebar_item
+
+
+def test_management_navigation_persists_and_applies_sidebar_preference():
+    js = (STATIC_ROOT / "management-navigation.js").read_text(encoding="utf-8")
+
+    assert "const SIDEBAR_PREF_KEY = 'nkb.sidebar.expanded';" in js
+    assert "localStorage.getItem(SIDEBAR_PREF_KEY)" in js
+    assert "if (value === '0') return false;" in js
+    assert "if (value === '1') return true;" in js
+    assert "return true;" in js
+    assert "localStorage.setItem(SIDEBAR_PREF_KEY, expanded ? '1' : '0')" in js
+    assert "document.body.classList.toggle('sidebar-expanded', expanded)" in js
+    assert "toggle.setAttribute('aria-expanded', String(expanded))" in js
+    assert "const toggle = document.getElementById('sidebar-toggle');" in js
+    assert "const toggle = navigationById('sidebar-toggle');" in js
+    assert js.count("if (toggle)") == 2
+    assert js.index("applySidebarExpanded(readSidebarPref())") < js.index(
+        "const toggle = navigationById('sidebar-toggle');"
+    )
+    assert js.index("applySidebarExpanded(nextExpanded)") < js.index(
+        "writeSidebarPref(nextExpanded)"
+    )
+    export = js[js.index("window.NKB.navigation =") :]
+    assert "initNavigation" in export
+    assert "readSidebarPref" not in export
+    assert "writeSidebarPref" not in export
+    assert "applySidebarExpanded" not in export
+
+
+def test_management_sidebar_alignment_does_not_add_excluded_navigation_features():
+    paths = [
+        STATIC_ROOT / "index.html",
+        STATIC_ROOT / "styles.css",
+        STATIC_ROOT / "management-navigation.js",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    for excluded in [
+        "sidebar__group",
+        "sidebar__item--parent",
+        "sidebar__submenu",
+        "topnav-mount",
+        "topbar__reserved",
+        "topnav__",
+        "window.NAGENT",
+        "nagent.",
+    ]:
+        assert excluded not in combined
+    assert "history.pushState" not in combined
+
+
+def test_management_app_keeps_navigation_initialization_contract():
+    js = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "const { api, ui, navigation } = window.NKB;" in js
+    assert "navigation.initNavigation();" in js
+
+
+def test_management_navigation_preserves_leaf_hash_routing_and_title_sync():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    js = (STATIC_ROOT / "management-navigation.js").read_text(encoding="utf-8")
+
+    for tab_name in ["overview", "documents", "retrieval", "health"]:
+        assert f'href="#{tab_name}"' in html
+        assert f'data-tab="{tab_name}"' in html
+    assert "window.addEventListener('hashchange'" in js
+    assert "history.replaceState(null, '', '#overview')" in js
+    assert "sidebar__item--active" in js
+    assert "navigationById('topbar-title').textContent" in js
+    assert "switchTab(selectedTabFromHash())" in js
+    assert "history.pushState" not in js
+
+
+def test_management_sidebar_divider_matches_n_agent_layout_contract():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    divider = '<hr class="sidebar__divider" aria-hidden="true">'
+    assert html.count(divider) == 1
+    assert html.index('data-tab="retrieval"') < html.index(divider) < html.index(
+        'data-tab="health"'
+    )
+    assert _css_declarations(css, ".sidebar__divider") == [
+        "flex: 0 0 1px",
+        "height: 1px",
+        "margin: 6px 8px",
+        "background: var(--color-border-light)",
+        "border: 0",
+        "padding: 0",
+    ]

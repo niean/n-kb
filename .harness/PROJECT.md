@@ -8,6 +8,10 @@ N-KB 是独立的知识库与 RAG 服务，为 N-Agent 和其它调用方提供�
 
 本节为 Harness 框架提供项目级配置，框架文件通过 `.harness/PROJECT.md` 直接引用。
 
+## 运行配置
+
+机器可读的 Harness 运行配置统一位于 `.harness/harness.json`，消费者通过 `sh .harness/framework/scripts/get-config.sh <config-key>` 读取。当前启用 Codex Third Review 与 after-finish Hook；本文件只保留项目说明、知识索引和人工规则，不重复维护运行值或默认值。
+
 ## 知识库目录
 
 首次加载时需建立 SUMMARY 索引的目录：
@@ -59,6 +63,16 @@ python -m pytest -v
 
 ```bash
 python -m pytest -v
+```
+
+### E2E 测试
+
+E2E 测试执行策略：
+- 仅在用户明确要求且本地 Docker Compose 环境可用时执行，不连接共享或生产数据。
+- 使用现有本地配置启动 Qdrant、Ollama 和 N-KB，完成镜像重建、服务启动与健康检查。
+
+```bash
+bash docker/restart.sh
 ```
 
 ## 扫描维度
@@ -148,6 +162,8 @@ AGENTS.md              -- AI 入口（纯路由）
 CLAUDE.md              -- Claude Code 入口
 .harness/
   PROJECT.md           -- 项目规范入口（本文件）
+  harness.json         -- Harness 机器可读运行配置
+  hooks/               -- Workflow 项目扩展 Hook（after-finish.sh）
   framework/           -- 通用能力（详见 FRAMEWORK.md "Framework 目录结构"）
   knowledge/           -- AI 知识库（01~05 认知约束类, 21~22 工具索引类）
   prd/                 -- 产品文档（AI只读：01-prd-sense、02-prd-baseline、03-prd-specs）
@@ -156,6 +172,7 @@ CLAUDE.md              -- Claude Code 入口
   specs/               -- 设计文档
     active/
     completed/
+    verify/            -- 人工端到端验收文件
   plans/               -- 实现计划
     active/
     completed/

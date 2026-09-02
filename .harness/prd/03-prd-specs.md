@@ -31,7 +31,21 @@
   - 接口：MCP，支持stdio传输类型
 
 [20260617]
+- FR
   - 接口：MCP，干掉检索工具
+
+[20260829]
+- FR
+  - 前端：左导样式优化。参考n-agent的左导样式，更新n-kb左导。n-agent /Users/niean/code/github.com/niean/n-agent
+  - 左导：n-kb左导，宽度、字体都明显大于n-agent，需要调整n-kb使跟n-agent一致
+
+[20260902]
+- HE
+  - HE：参照最新版本，升级本项目的Harness框架，识别和修正冲突，项目私有 knowledge/ 只做兼容性修正(不覆盖其业务语义)。新版Harness所在目录是：/Users/niean/code/github.com/niean/harness-tpl。建议步骤：S1.分析新老DIFF，S2.等待用户确认升级方案、补全信息，S3.执行。
+- FR
+  - 前端：左导样式优化，包括左导栏宽度、字体大小、图标大小，设置调整、使跟n-agent一致。n-agent /Users/niean/code/github.com/niean/n-agent
+  - 前端：左导样式优化，检索、健康两个菜单间增加分隔符。使用迭代功能WF、三方审阅使用cc
+
 
 ---
 

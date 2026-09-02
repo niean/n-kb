@@ -293,6 +293,7 @@
 * 操作列固定
 * 危险操作二次确认
 * 支持 Empty State
+* 数字列的列头名称与数据取值均右对齐，数据取值采用千分位法展示
 
 建议列顺序：
 
@@ -301,6 +302,13 @@
 3. 状态
 4. 时间
 5. 操作
+
+## 列表操作
+
+* 操作按钮顺序：从左到右，先变更类再查询类，典型顺序如 `启用|停用、探活、刷新、执行、编辑、删除、详情`
+* 操作按钮样式：按钮功能异构时，控制置灰不可用、但不要隐藏，如启用状态下`删除`按钮置灰不可用；所有按钮不允许使用下划线
+* 操作详情按钮：使用弹出框（Modal）承载，禁止使用页面下方的 inline 容器
+* 状态字段：badge 形式"启用/停用"，底色"浅绿/浅黄"
 
 ## 卡片与详情
 
@@ -325,6 +333,29 @@
 * Warning
 * Error
 * Unknown
+
+## Tooltip / Tips
+
+用于对标题、列名等提供补充说明，统一采用 panel-title-group + panel-title + panel-tips 三件套结构。
+
+结构：
+
+* 容器：.panel-title-group（position: relative；inline-flex；承载 title 与 tips 两个 span）
+* 标题：.panel-title（带 dashed 下划线，作为可悬停的可视提示）
+* 说明：.panel-tips（绝对定位浮层，默认隐藏，hover/focus-within 容器时显示）
+
+样式约束：
+
+* 浮层左对齐于容器（left: 0），箭头固定在 left: 14px
+* 最大宽度 480px，按文本宽度自适应
+* 文案使用普通文本，禁止 emoji/加粗/斜体
+* 通过 hover 与 focus-within 触发显示，保证键盘可访问
+
+复用规则：
+
+* 任何需要标题补充说明的场景（面板标题、表头列名等）一律复用本组件
+* 禁止为表头、按钮等场景另造异构 tooltip 实现
+* 文案以纯文本写入 .panel-tips 的 textContent，禁止 innerHTML
 
 ---
 
@@ -557,3 +588,26 @@
 3. 临时兼容代码
 4. 与业务强绑定实现
 5. 不必要工程体系
+
+---
+
+# 十三、TUI/CLI 设计规范
+
+本节适用于终端用户界面（TUI）与命令行接口（CLI），涵盖 Chat REPL（交互式）与单次执行命令（`<cmd>` 从 shell 执行）两种界面形态。Web FE 与 TUI/CLI 同属"用户面"规范，复用一致性、信息架构、安全边界等通用原则。
+
+## 双界面等价原则
+
+项目同时提供 Chat REPL 与单次执行 CLI 时，两者命令集必须等价：chat 囊括所有 cmd，单次执行仅作为 shell 自动化/脚本场景的快捷入口。
+
+实现顺序上，先 chat slash cmd，再单次执行 cmd，禁止反向，确保Chat REPL是全集。
+
+如遇例外，如某命令无法在 REPL 中实现，必须经用户确认、在验收文档中留档；禁止静默遗漏，禁止以"技术困难"为由跳过 REPL 支持而不留档。
+
+## 输出格式
+
+CLI 命令输出默认 JSON，可通过 flag 切换：
+
+* (默认) JSON 格式，适合脚本解析
+* `--json` 显式 JSON（与默认一致，向后兼容，no-op）
+* `--form` 人类可读形式：表格(list) / key-value(dict) / markdown(skill view) / doctor report
+* `--yaml` YAML 格式

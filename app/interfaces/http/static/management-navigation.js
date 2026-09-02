@@ -1,6 +1,29 @@
 const { ui: navigationUi } = window.NKB;
 const { byId: navigationById } = navigationUi;
 
+const SIDEBAR_PREF_KEY = 'nkb.sidebar.expanded';
+
+function readSidebarPref() {
+  try {
+    const value = localStorage.getItem(SIDEBAR_PREF_KEY);
+    if (value === '0') return false;
+    if (value === '1') return true;
+  } catch (_) { /* localStorage 不可用时使用默认值 */ }
+  return true;
+}
+
+function writeSidebarPref(expanded) {
+  try {
+    localStorage.setItem(SIDEBAR_PREF_KEY, expanded ? '1' : '0');
+  } catch (_) { /* 写入失败不回滚当前 UI */ }
+}
+
+function applySidebarExpanded(expanded) {
+  document.body.classList.toggle('sidebar-expanded', expanded);
+  const toggle = document.getElementById('sidebar-toggle');
+  if (toggle) toggle.setAttribute('aria-expanded', String(expanded));
+}
+
 const tabNames = ['overview', 'documents', 'retrieval', 'health'];
 
 function selectedTabFromHash() {
@@ -23,10 +46,15 @@ function switchTab(tabName) {
 }
 
 function initNavigation() {
-  navigationById('sidebar-toggle').addEventListener('click', () => {
-    const expanded = document.body.classList.toggle('sidebar-expanded');
-    navigationById('sidebar-toggle').setAttribute('aria-expanded', String(expanded));
-  });
+  applySidebarExpanded(readSidebarPref());
+  const toggle = navigationById('sidebar-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const nextExpanded = !document.body.classList.contains('sidebar-expanded');
+      applySidebarExpanded(nextExpanded);
+      writeSidebarPref(nextExpanded);
+    });
+  }
   document.querySelectorAll('.sidebar__item').forEach((link) => {
     link.addEventListener('click', () => switchTab(link.dataset.tab));
   });

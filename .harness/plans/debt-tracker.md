@@ -2,6 +2,7 @@
 
 | ID | 描述 | 优先级 | 来源计划 | 发现时间 | 状态 |
 |----|------|--------|---------|---------|------|
+| D001 | pytest 运行时 FastAPI TestClient 触发 StarletteDeprecationWarning，后续需迁移到 httpx2 兼容路径并清除警告 | low | N/A | 2026-08-29 | resolved |
 
 ---
 
