@@ -7,7 +7,7 @@
 - 依赖组装：`app/composition.py`，集中组装 Infrastructure 具体实现、Application services 和健康检查服务
 - 配置模型：`app/config.py`，定义 `Settings`，从 `.env` 和环境变量读取 `N_KB_` 配置
 - Python 依赖：`pyproject.toml`，定义运行依赖、dev 依赖和 pytest 配置
-- 环境变量模板：`.env.example`，不包含真实密钥
+- 环境变量模板：`docker/.env.example`，不包含真实密钥和宿主机个人路径
 
 ## Domain Layer
 
@@ -57,7 +57,8 @@
 ## Docker 与部署
 
 - 镜像构建：`docker/Dockerfile`，使用 Python 3.11 slim 镜像，安装项目并以 Uvicorn 启动服务端口
-- Compose 部署：`docker/docker-compose.yml`，定义 `n-kb`、`qdrant`、`ollama`、`ollama-pull-bge-m3` 服务、端口和 volume
+- Compose 部署：`docker/docker-compose.yml`，定义 `n-kb`、`qdrant`、`ollama`、`ollama-pull-bge-m3` 服务、端口和 volume；该文件被 `.gitignore` 忽略，本地按需保留宿主机路径
+- Compose 配置样例：`docker/docker-compose.yml.example`，脱敏后的可提交样例，宿主机挂载目录通过 `N_KB_QDRANT_STORAGE_DIR`、`N_KB_OLLAMA_HOME` 覆盖，默认落在项目内 `locals/` 下
 - Docker 构建忽略：`.dockerignore`，排除 `.claude`、`.harness`、`.git`、缓存、venv、locals、data
 - 本地运行产物：`locals/`、`data/`、`.pytest_cache/`、`__pycache__/`、`*.pyc`、`*.egg-info/` 是运行、测试或构建缓存产物
 

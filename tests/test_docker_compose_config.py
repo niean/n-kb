@@ -68,8 +68,12 @@ def test_docker_compose_declares_expected_services_ports_and_volumes(compose_fil
 
     assert "../locals:/app/locals" in services["n-kb"]["volumes"]
     assert "../data:/app/data" in services["n-kb"]["volumes"]
-    assert "/Users/niean/install/qdrant/storage:/qdrant/storage" in services["qdrant"]["volumes"]
-    assert "/Users/niean/install/ollama:/root/.ollama" in services["ollama"]["volumes"]
+    assert any(
+        volume.endswith(":/qdrant/storage") for volume in services["qdrant"]["volumes"]
+    )
+    assert any(
+        volume.endswith(":/root/.ollama") for volume in services["ollama"]["volumes"]
+    )
     assert "volumes" not in compose_config
 
 

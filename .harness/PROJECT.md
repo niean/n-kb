@@ -186,8 +186,11 @@ app/
   interfaces/          -- HTTP API 与 FE 静态资源
   interfaces/http/static/ -- 简单 FE 页面资源
 tests/                 -- pytest 测试
-Dockerfile             -- 容器镜像构建
-docker-compose.yml.example -- Docker Compose 示例
+docker/
+  Dockerfile           -- 容器镜像构建
+  docker-compose.yml   -- 本地 Compose 部署（.gitignore 忽略）
+  docker-compose.yml.example -- Docker Compose 脱敏样例
+  .env.example         -- Compose 环境变量样例
 pyproject.toml         -- Python 依赖与 pytest 配置
 ```
 
