@@ -30,6 +30,8 @@ services:
     volumes:
       - ../locals:/app/locals
       - ../data:/app/data
+    cpus: 1
+    mem_limit: 1024m
     depends_on:
       qdrant:
         condition: service_started
@@ -45,6 +47,8 @@ services:
     volumes:
       # 复用已有 Qdrant 数据目录时，在 docker/.env 设置 N_KB_QDRANT_STORAGE_DIR 指向宿主机绝对路径。
       - ${N_KB_QDRANT_STORAGE_DIR:-../locals/qdrant/storage}:/qdrant/storage
+    cpus: 1
+    mem_limit: 1024m
 
   ollama:
     image: ollama/ollama@sha256:46399ef084d97b381955b5dc585c5d836dbe7ed3f79f170d1c04660fed511e3a
@@ -53,11 +57,15 @@ services:
     volumes:
       # 复用已有 Ollama 模型目录时，在 docker/.env 设置 N_KB_OLLAMA_HOME 指向宿主机绝对路径，避免重复下载模型。
       - ${N_KB_OLLAMA_HOME:-../locals/ollama}:/root/.ollama
+    cpus: 1
+    mem_limit: 1024m
 
   ollama-pull-bge-m3:
     image: ollama/ollama@sha256:46399ef084d97b381955b5dc585c5d836dbe7ed3f79f170d1c04660fed511e3a
     environment:
       OLLAMA_HOST: http://ollama:11434
+    cpus: 1
+    mem_limit: 256m
     depends_on:
       - ollama
     entrypoint:
