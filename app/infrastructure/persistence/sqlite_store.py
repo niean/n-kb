@@ -22,7 +22,7 @@ class SQLiteStore:
 
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
+            connection.cursor().executescript(
                 """
                 CREATE TABLE IF NOT EXISTS documents(
                     id TEXT PRIMARY KEY,
@@ -107,7 +107,7 @@ class SQLiteStore:
     def save_document(self, document: Document, content: DocumentContent, tags: list[Tag]) -> None:
         tag_created_at = self._serialize_datetime(datetime.now(timezone.utc))
         with self._connect() as connection:
-            connection.execute(
+            connection.cursor().execute(
                 """
                 INSERT OR REPLACE INTO documents(
                     id, title, source_kind, source_uri, source_display_name, content_hash,
@@ -128,7 +128,7 @@ class SQLiteStore:
                     self._serialize_datetime(document.updated_at),
                 ),
             )
-            connection.execute(
+            connection.cursor().execute(
                 """
                 INSERT OR REPLACE INTO document_contents(
                     document_id, text, encoding, content_hash, created_at
@@ -142,8 +142,8 @@ class SQLiteStore:
                     self._serialize_datetime(content.created_at),
                 ),
             )
-            connection.execute("DELETE FROM document_tags WHERE document_id = ?", (document.id,))
-            connection.executemany(
+            connection.cursor().execute("DELETE FROM document_tags WHERE document_id = ?", (document.id,))
+            connection.cursor().executemany(
                 """
                 INSERT INTO document_tags(document_id, tag_key, tag_value, created_at)
                 VALUES (?, ?, ?, ?)
@@ -153,12 +153,12 @@ class SQLiteStore:
 
     def get_document(self, document_id: str) -> Document | None:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+            row = connection.cursor().execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
         return self._document_from_row(row) if row else None
 
     def find_by_content_hash(self, content_hash: str) -> Document | None:
         with self._connect() as connection:
-            row = connection.execute(
+            row = connection.cursor().execute(
                 "SELECT * FROM documents WHERE content_hash = ? ORDER BY created_at LIMIT 1",
                 (content_hash,),
             ).fetchone()
@@ -166,7 +166,7 @@ class SQLiteStore:
 
     def get_content(self, document_id: str) -> DocumentContent | None:
         with self._connect() as connection:
-            row = connection.execute(
+            row = connection.cursor().execute(
                 "SELECT * FROM document_contents WHERE document_id = ?",
                 (document_id,),
             ).fetchone()
@@ -199,12 +199,12 @@ class SQLiteStore:
                 params.extend([key, value])
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
-            rows = connection.execute(f"SELECT * FROM documents{where} ORDER BY created_at", params).fetchall()
+            rows = connection.cursor().execute(f"SELECT * FROM documents{where} ORDER BY created_at", params).fetchall()
         return [self._document_from_row(row) for row in rows]
 
     def get_tags(self, document_id: str) -> list[Tag]:
         with self._connect() as connection:
-            rows = connection.execute(
+            rows = connection.cursor().execute(
                 """
                 SELECT tag_key, tag_value FROM document_tags
                 WHERE document_id = ?
@@ -216,24 +216,24 @@ class SQLiteStore:
 
     def update_status(self, document_id: str, status: DocumentStatus) -> None:
         with self._connect() as connection:
-            connection.execute(
+            connection.cursor().execute(
                 "UPDATE documents SET status = ?, updated_at = ? WHERE id = ?",
                 (status.value, self._serialize_datetime(datetime.now(timezone.utc)), document_id),
             )
 
     def delete_document(self, document_id: str) -> None:
         with self._connect() as connection:
-            connection.execute("DELETE FROM document_tags WHERE document_id = ?", (document_id,))
-            connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-            connection.execute("DELETE FROM document_contents WHERE document_id = ?", (document_id,))
-            connection.execute("DELETE FROM index_jobs WHERE document_id = ?", (document_id,))
-            connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+            connection.cursor().execute("DELETE FROM document_tags WHERE document_id = ?", (document_id,))
+            connection.cursor().execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+            connection.cursor().execute("DELETE FROM document_contents WHERE document_id = ?", (document_id,))
+            connection.cursor().execute("DELETE FROM index_jobs WHERE document_id = ?", (document_id,))
+            connection.cursor().execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
     def replace_chunks(self, document_id: str, chunks: list[Chunk]) -> None:
         created_at = self._serialize_datetime(datetime.now(timezone.utc))
         with self._connect() as connection:
-            connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-            connection.executemany(
+            connection.cursor().execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+            connection.cursor().executemany(
                 """
                 INSERT INTO chunks(
                     id, document_id, ordinal, text, content_hash, token_count, metadata_json, created_at
@@ -256,7 +256,7 @@ class SQLiteStore:
 
     def list_chunks(self, document_id: str) -> list[Chunk]:
         with self._connect() as connection:
-            rows = connection.execute(
+            rows = connection.cursor().execute(
                 "SELECT * FROM chunks WHERE document_id = ? ORDER BY ordinal",
                 (document_id,),
             ).fetchall()
@@ -275,7 +275,7 @@ class SQLiteStore:
 
     def create_job(self, job: IndexJob) -> None:
         with self._connect() as connection:
-            connection.execute(
+            connection.cursor().execute(
                 """
                 INSERT INTO index_jobs(id, document_id, status, stage, error, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -293,7 +293,7 @@ class SQLiteStore:
 
     def get_job(self, job_id: str) -> IndexJob | None:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM index_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = connection.cursor().execute("SELECT * FROM index_jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             return None
         return IndexJob(
@@ -314,7 +314,7 @@ class SQLiteStore:
         error: str | None = None,
     ) -> None:
         with self._connect() as connection:
-            connection.execute(
+            connection.cursor().execute(
                 "UPDATE index_jobs SET status = ?, stage = ?, error = ?, updated_at = ? WHERE id = ?",
                 (
                     status.value,
@@ -328,7 +328,7 @@ class SQLiteStore:
     def health(self) -> dict[str, object]:
         try:
             with self._connect() as connection:
-                connection.execute("SELECT 1").fetchone()
+                connection.cursor().execute("SELECT 1").fetchone()
         except sqlite3.Error:
             return {"status": "error"}
         return {"status": "ok"}

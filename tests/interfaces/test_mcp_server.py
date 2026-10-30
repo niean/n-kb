@@ -56,9 +56,11 @@ def mounted_paths(app):
 
 
 def test_create_app_service_registry_remains_available():
+    # T7：services 由 lifespan 填充，注册表键在启动后保持不变。
     app = create_app(Settings(_env_file=None, mcp_enabled=False))
 
-    assert set(app.state.services) == {"documents", "ingestion", "index_jobs", "retrieval", "health"}
+    with TestClient(app):
+        assert set(app.state.services) == {"documents", "ingestion", "index_jobs", "retrieval", "health"}
 
 
 
@@ -201,9 +203,29 @@ async def test_stdio_server_exposes_existing_mcp_tools(monkeypatch):
     class Services:
         health = FakeHealthService()
 
-    monkeypatch.setattr(mcp_stdio, "build_services", lambda settings: Services())
+    monkeypatch.setattr(mcp_stdio, "build_services", lambda settings, **kwargs: Services())
 
     server = mcp_stdio.create_stdio_server(Settings(_env_file=None))
+    tools = await server.list_tools()
+
+    assert [tool.name for tool in tools] == ["status"]
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_accepts_injected_services(monkeypatch):
+    from app import mcp_stdio
+
+    class Services:
+        health = FakeHealthService()
+
+    services = Services()
+    monkeypatch.setattr(
+        mcp_stdio,
+        "build_services",
+        lambda settings, **kwargs: pytest.fail("services were injected"),
+    )
+
+    server = mcp_stdio.create_stdio_server(Settings(_env_file=None), services=services)
     tools = await server.list_tools()
 
     assert [tool.name for tool in tools] == ["status"]
@@ -212,18 +234,75 @@ async def test_stdio_server_exposes_existing_mcp_tools(monkeypatch):
 def test_stdio_main_runs_stdio_transport(monkeypatch):
     from app import mcp_stdio
 
-    class Server:
-        call = None
+    events = []
 
+    class Server:
         def run(self, transport="stdio"):
-            self.call = transport
+            events.append(("run", transport))
 
     server = Server()
-    monkeypatch.setattr(mcp_stdio, "create_stdio_server", lambda: server)
+
+    class Services:
+        health = FakeHealthService()
+
+    services = Services()
+    monkeypatch.setattr(
+        mcp_stdio, "Settings", lambda: Settings(_env_file=None, otel_enabled=False)
+    )
+    monkeypatch.setattr(
+        mcp_stdio, "build_services", lambda settings, **kwargs: services
+    )
+    monkeypatch.setattr(
+        mcp_stdio,
+        "create_stdio_server",
+        lambda settings=None, services=None: events.append(
+            ("create", settings, services)
+        )
+        or server,
+    )
 
     mcp_stdio.main()
 
-    assert server.call == "stdio"
+    assert len(events) == 2
+    create_event, run_event = events
+    assert create_event[0] == "create"
+    assert create_event[1].otel_enabled is False  # main 只读取一次 Settings
+    assert create_event[2] is services
+    assert run_event == ("run", "stdio")
+
+
+def test_stdio_main_releases_observability_when_server_construction_fails(monkeypatch):
+    from app import mcp_stdio
+
+    released = []
+    handle = type("H", (), {"release": staticmethod(lambda: released.append(True))})()
+
+    class Services:
+        health = FakeHealthService()
+
+    monkeypatch.setattr(
+        mcp_stdio, "Settings", lambda: Settings(_env_file=None, otel_enabled=False)
+    )
+    monkeypatch.setattr(
+        mcp_stdio, "build_services", lambda settings, **kwargs: Services()
+    )
+    monkeypatch.setattr(
+        mcp_stdio,
+        "start_observability",
+        lambda settings: handle,
+    )
+    monkeypatch.setattr(
+        mcp_stdio,
+        "create_stdio_server",
+        lambda settings=None, services=None: (_ for _ in ()).throw(
+            RuntimeError("boom")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        mcp_stdio.main()
+
+    assert released == [True]
 
 
 def test_stdio_module_entrypoint_exports_main():

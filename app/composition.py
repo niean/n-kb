@@ -1,4 +1,7 @@
+import sys
+import threading
 from dataclasses import dataclass
+from typing import Any, Optional
 
 from app.application.document_service import DocumentService
 from app.application.health_service import HealthService
@@ -42,7 +45,17 @@ def _build_vector_index(settings: Settings) -> QdrantVectorIndex:
         )
 
 
-def build_services(settings: Settings) -> AppServices:
+def build_services(
+    settings: Settings,
+    *,
+    embedding_observer: Any = None,
+) -> AppServices:
+    """组装业务服务。
+
+    ``embedding_observer`` 是组合根注入的可选观测 scope 工厂（Application
+    层 helper；Infrastructure 不反向 import Application）。缺省 None 保持
+    旧调用能力（无观测）。
+    """
     sqlite_store = SQLiteStore(settings.sqlite_path)
     object_store = LocalObjectStore(settings.storage_root)
     parser = SimpleTextParser()
@@ -50,6 +63,7 @@ def build_services(settings: Settings) -> AppServices:
     embedding_provider = OllamaEmbeddingProvider(
         base_url=settings.embedding_base_url,
         model=settings.embedding_model,
+        embedding_observer=embedding_observer,
     )
     vector_index = _build_vector_index(settings)
 
@@ -85,3 +99,262 @@ def build_services(settings: Settings) -> AppServices:
         retrieval=retrieval_service,
         health=health_service,
     )
+
+
+# ---------------------------------------------------------------------------
+# 组合根观测装配（HTTP 与 stdio 两入口复用）
+# ---------------------------------------------------------------------------
+
+
+def _start_profiler(handle: Any, settings: Settings) -> None:
+    """创建并启动 Profile 采样器（缺 py-spy 是有界 degraded，不是失败）。
+
+    顺序遵循 T6 合同：以 handle.profiler_on_status() 构造，先注册 stop
+    callback，再 start；start 成功才 mark_profiler_attached。"""
+    from app.infrastructure.observability.profiling import get_or_create_profiler
+
+    try:
+        sampler = get_or_create_profiler(
+            settings,
+            instance_id=handle.instance_id,
+            on_status=handle.profiler_on_status(),
+        )
+    except Exception:
+        return
+    if sampler is None:
+        return
+    if not sampler.register_with_handle(handle):
+        # 句柄已 shutdown：不再启动无法被回收的采样线程。
+        return
+    if sampler.start():
+        handle.mark_profiler_attached()
+
+
+def register_application_log_events() -> None:
+    """登记 Application 层业务完成日志模板到 fail-closed 事件注册表（幂等）。
+
+    完成日志模板的权威来源是各业务模块常量；登记后 project_record 按事件
+    码放行正文（message 经脱敏限长），未登记记录折叠为 diagnostic_log。
+    """
+    from app.infrastructure.observability.logging import register_safe_event
+
+    from app.application import ingestion_service, retrieval_service, telemetry_semantics
+    import logging
+    logging.getLogger("app.application").setLevel(logging.INFO)
+
+    register_safe_event(telemetry_semantics.OPERATION_COMPLETED_TEMPLATE, "nkb.operation.completed")
+    register_safe_event(telemetry_semantics.STAGE_COMPLETED_TEMPLATE,"nkb.index.stage.completed")
+    register_safe_event(telemetry_semantics.EMBEDDING_COMPLETED_TEMPLATE,"nkb.embedding.completed")
+    for template in retrieval_service.RETRIEVAL_COMPLETED_TEMPLATES:
+        register_safe_event(template, retrieval_service.RETRIEVAL_COMPLETED_EVENT)
+    for template in ingestion_service.INDEX_COMPLETED_TEMPLATES:
+        register_safe_event(template, ingestion_service.INDEX_COMPLETED_EVENT)
+
+
+# 只读自检快照的固定信号集合（与 setup.py 的四信号一致）。
+_OBSERVATION_SIGNALS = ("traces", "metrics", "logs", "profile")
+
+
+def get_suppress_client_spans() -> Any:
+    """解析 Infrastructure 层 client span 抑制实现（函数内延迟 import）。
+
+    stdio 入口等非组合根模块经此函数取得实现，避免直接 import
+    app.infrastructure 符号；main.py 等组合根仍可直接 import。
+    """
+    from app.infrastructure.observability.instrumentors import suppress_client_spans
+
+    return suppress_client_spans
+
+_OBSERVATION_PAGE_SIZE = 10
+
+
+def _disabled_signal() -> dict:
+    return {
+        "status": "disabled",
+        "delivery": "disabled",
+        "attempt_count": 0,
+        "success_count": 0,
+        "failure_count": 0,
+        "last_success": None,
+        "last_failure": None,
+        "current_error": None,
+    }
+
+
+def build_observation_snapshot(settings: Settings, handle: Any) -> Any:
+    """构造只读自检快照 callable（T9 合同，注入 ``app.state``）。
+
+    Interfaces 只消费该 callable（``observation_snapshot(page, size) ->
+    dict``），不接触 runtime、Infrastructure 类型或任何 SDK。本函数闭包
+    组合根已持有的依赖：观测句柄（``None`` = 禁用）、配置中已验证的
+    Grafana 外链 base URL（仅非空时输出）与 Application 层 semconv 版本。
+
+    - ``handle=None``：返回完整合同的 disabled 快照（零观测装配，不是
+      错误）；``handle`` 为诊断句柄（``diagnostic_error`` 非空）时透传
+      其 degraded 状态，不误报 disabled。
+    - 分页只作用于 ring buffer spans（最近 100 条已结束 sampled span）。
+    - 纯投影：无完整配置、无凭据、无原异常，不发起网络探测。
+    """
+    from app.application import telemetry_semantics
+
+    from app.interfaces.http.observation_links import build_links, trace_link, valid_url
+
+    grafana = {
+        "base_url": settings.otel_grafana_base_url if valid_url(settings.otel_grafana_base_url) else None,
+        "traces_base_url": settings.otel_grafana_traces_base_url if valid_url(settings.otel_grafana_traces_base_url) else None,
+    }
+    semconv_version = telemetry_semantics.SEMCONV_VERSION
+
+    def observation_snapshot(page: int = 1, size: int = _OBSERVATION_PAGE_SIZE) -> dict:
+        def _base_payload(
+            status: str, mode: str, diagnostic_error: Optional[str]
+        ) -> dict:
+            """disabled/兜底分支共用的合同底座，避免两处手写形状漂移。"""
+            return {
+                "status": status,
+                "mode": mode,
+                "instance_id": None,
+                "sample_ratio": settings.otel_traces_sample_ratio,
+                "semconv_version": semconv_version,
+                "signals": {name: _disabled_signal() for name in _OBSERVATION_SIGNALS},
+                "spans": [],
+                "pagination": {"page": page, "size": size, "total": 0, "pages": 0},
+                "grafana": dict(grafana),
+                "links": build_links(settings),
+                "metric_snapshot": {"status": status, "instruments": [], "error": diagnostic_error, "collected_at": None, "stale": False, "collection_count": 0, "collection_interval_millis": 15000, "last_success_at": None, "truncated": False, "truncation_scope": []},
+                "logs": {"status": status, "items": [], "retained_count": 0, "capacity": 100, "returned_count": 0, "evicted_count": 0},
+                "dropped_after_deadline": 0,
+                "diagnostic_error": diagnostic_error,
+                "differing_fields": [],
+            }
+
+        if handle is None:
+            payload = _base_payload("disabled", "disabled", None)
+            payload["pagination"] = {
+                "page": page, "size": size, "total": 0, "pages": 0,
+            }
+            return payload
+        try:
+            snapshot = handle.snapshot()
+        except Exception:
+            # T4 合同 snapshot() 不抛出；防御性兜底仍给出可读 degraded，
+            # 根因写一行有界 stderr 诊断（不输出原异常文本）。
+            sys.stderr.write(
+                "n-kb observability: snapshot() failed; reporting degraded\n"
+            )
+            return _base_payload("degraded", "unknown", "snapshot_failed")
+        spans = list(snapshot.get("spans") or [])
+        total = len(spans)
+        start = (page - 1) * size
+        snapshot["spans"] = spans[start : start + size]
+        snapshot["pagination"] = {
+            "page": page,
+            "size": size,
+            "total": total,
+            "pages": (total + size - 1) // size,
+        }
+        snapshot["grafana"] = dict(grafana)
+        snapshot.setdefault("metric_snapshot", {"status": "unknown", "instruments": [], "error": None, "collected_at": None, "stale": False, "collection_count": 0, "collection_interval_millis": 15000, "last_success_at": None, "truncated": False, "truncation_scope": []})
+        snapshot.setdefault("logs", {"status": "unknown", "items": [], "retained_count": 0, "capacity": 100, "returned_count": 0, "evicted_count": 0})
+        snapshot["links"] = build_links(settings, snapshot.get("instance_id"))
+        for span in snapshot["spans"]:
+            span["trace_url"] = trace_link(settings, span.get("trace_id"), snapshot.get("instance_id"))
+        for item in snapshot.get("logs", {}).get("items", []):
+            item["trace_url"] = trace_link(settings, item.get("trace_id"), snapshot.get("instance_id"))
+        snapshot.setdefault("semconv_version", semconv_version)
+        return snapshot
+
+    return observation_snapshot
+
+
+_OBSERVABILITY_START_LOCK = threading.RLock()
+
+
+def start_observability(settings: Settings) -> Optional[Any]:
+    if not settings.otel_enabled:
+        return None
+    with _OBSERVABILITY_START_LOCK:
+        return _start_observability(settings)
+
+
+def _start_observability(settings: Settings) -> Optional[Any]:
+    """组合根统一的观测启动（HTTP lifespan 与 stdio main 复用）。
+
+    顺序：setup_observability -> global instrumentors -> logging handlers
+    -> Profile 采样器。禁用时返回 None 且零观测 import（不装埋点、不挂
+    handler、不启动采样器）；启用失败（冲突/降级句柄）不阻断业务启动。
+    """
+    from app.application import telemetry_semantics, telemetry_details
+    from app.infrastructure.observability.sanitizer import bind_details
+    from app.infrastructure.observability.instrumentors import (
+        install_global_instrumentors,
+    )
+    from app.infrastructure.observability.logging import (
+        attach_observability_log_handlers,
+        configure_execution_context,
+        prepare_sanitizer,
+    )
+    from app.infrastructure.observability.setup import setup_observability, get_runtime_handle
+    from app.infrastructure.observability.snapshots import safe_dimensions
+
+    def metric_attributes(attributes, dimensions):
+        projected = safe_dimensions(attributes, dimensions)
+        model_key = telemetry_semantics.GEN_AI_REQUEST_MODEL
+        configured_model = getattr(settings, "embedding_model", None)
+        if model_key in dimensions and attributes.get(model_key) == configured_model:
+            projected[model_key] = configured_model
+        return projected
+
+    def span_attributes(attributes):
+        import math
+        from app.infrastructure.observability.instrumentors import _filter_attributes
+        projected = _filter_attributes({key:value for key,value in attributes.items()
+                                       if key not in ("db.statement", "db.query.text")})
+        projected.update(safe_dimensions(attributes, ("nkb.outcome", "error.type", "gen_ai.operation.name", "gen_ai.token.type")))
+        for key in ("nkb.result_count", "nkb.chunk_count", "gen_ai.usage.input_tokens",
+                    "nkb.filter.tags", "nkb.filter.source_kind", "nkb.filter.document_status", "nkb.filter.min_score"):
+            value = attributes.get(key)
+            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                projected[key] = value
+        model = attributes.get(telemetry_semantics.GEN_AI_REQUEST_MODEL)
+        if model == getattr(settings, "embedding_model", None) and type(model) is str:
+            projected[telemetry_semantics.GEN_AI_REQUEST_MODEL] = model
+        document_id = telemetry_semantics.safe_id(attributes.get(telemetry_semantics.NKB_DOCUMENT_ID))
+        if document_id is not None:
+            projected[telemetry_semantics.NKB_DOCUMENT_ID] = document_id
+        return projected
+
+    active = get_runtime_handle()
+    handle = setup_observability(
+        settings,
+        semantics=telemetry_semantics,
+        semantics_keys={
+            "outcome": telemetry_semantics.NKB_OUTCOME,
+            "error_type": telemetry_semantics.ERROR_TYPE_ATTR,
+            "attribute_projector": span_attributes,
+            "metric_attribute_projector": metric_attributes,
+        },
+    )
+    if handle is None or active is not None or not handle.is_published:
+        return handle
+    bind_details(
+        configure=telemetry_details.configure_details,
+        project=telemetry_details.project_details,
+        validate=telemetry_details.validate_details,
+        flatten=telemetry_details.flatten_details,
+    )
+    install_global_instrumentors(settings=settings)
+    # Capture one startup catalog for HTTP and stdio, never on a second app.
+    import os
+    import re
+    sanitizer = prepare_sanitizer()
+    sanitizer.configure_secret_catalog(tuple(value for key,value in os.environ.items()
+        if re.search(r"api.?key|token|password|passwd|secret|credential", key, re.I) and value))
+    configure_execution_context(snapshot=telemetry_semantics.current_operation_context,
+        project=telemetry_details.project_details, validate=telemetry_details.validate_details,
+        flatten=telemetry_details.flatten_details, details_snapshot=telemetry_details.current_details,
+        budget=telemetry_details.budget_details, max_bytes=settings.otel_content_max_bytes)
+    register_application_log_events()
+    attach_observability_log_handlers(bridge=handle.log_bridge)
+    _start_profiler(handle, settings)
+    return handle

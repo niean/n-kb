@@ -53,6 +53,20 @@
 - embedding_model
 - ingestion_batch_size
 - max_upload_bytes
+- otel_enabled
+- otel_exporter_otlp_endpoint
+- otel_traces_sample_ratio
+- otel_content_max_bytes
+- otel_grafana_base_url
+- otel_grafana_traces_base_url
+- otel_grafana_metrics_base_url
+- otel_grafana_logs_base_url
+- otel_grafana_profile_base_url
+- profiling_enabled
+- profiling_pyroscope_endpoint
+- profiling_interval_seconds
+
+其中 otel_ / profiling_ 十二项为观测配置（env-only，启动期读取，无运行时修改接口）；exporter/Profile endpoint 强制 http/https、拒绝 userinfo/query/fragment；Grafana URL支持非秘密查询参数，拒绝userinfo/控制字符/秘密查询键及fragment，sample_ratio 限 0..1，interval 限 10..300 秒。新增三项外链优先于base_url派生值，单数profile命名与N-Agent一致。
 
 Docker Compose 项目名不属于应用配置，由 Docker Compose 读取 `COMPOSE_PROJECT_NAME`。
 
@@ -116,6 +130,16 @@ Interfaces 层请求和响应模型位于 `app/interfaces/http/`，仅作为外�
 - chunk 查询接口 `GET /documents/{document_id}/chunks` 返回只读 chunk 列表，用于管理页可视化入库切分结果；响应字段包括 id、document_id、ordinal、text、token_count、metadata
 - 检索接口接受 query、filters、top_k、min_score，filters 可包含 tags、source_kind、document_status
 - 检索响应返回结构化 `RetrievalResult` 列表，不返回底层向量、SQLite row 或 Qdrant payload
+- 观测自检端点 `GET /observations/otel` 为无鉴权只读接口（page 1..10、size 固定 10，非法 422；`Cache-Control: no-store`），返回组合根注入的纯函数快照：status、mode、instance_id、sample_ratio、semconv_version、四信号投递状态、ring buffer spans 分页、分页元数据、Grafana 原外链与服务端四信号links、metric_snapshot、logs及逐Trace URL；不返回完整配置、凭据、原异常，不发起网络探测
+
+## 观测数据边界
+
+- ring buffer 快照（`app/infrastructure/observability/setup.py`）为内存 `deque(maxlen=100)`，保留已结束 sampled span 的八个基础字段及经注入精确白名单投影的安全attributes；组合根再补trace_url。不保存任意原始属性、事件、异常与Resource，无磁盘持久化
+观测日志与详情采用统一Prepared脱敏和预算：注册模板用于稳定分类，普通应用/库/异常日志保留安全可读内容；Span属性/Event/OTLP复用同次投影，本地ring仅保留事实。完整文件、完整向量与凭据禁采，详见07-observability.md。
+- span 属性白名单投影：`db.statement`/`db.query.text` 仅保留剥离字面量后的表名；`set_status` 剥离 description；`record_exception`/`add_event` 拦截；`error.type` 为低基数枚举，原始异常文本不进 span
+- Profile 采样（py-spy）原始输出写系统临时目录（0700/0600、16 MiB 上限、成败均清理），上传前经折叠投影剥离动态帧与路径前缀，原始文件绝不上传，也不进入 `/app/data`
+
+- 指标摘要复用15秒reader同批次，最多32 instrument×100点；日志最多100条、返回最新10条；精确安全字段/有限数值，短锁副本，关闭清空。完整形状与窗口/截断/状态说明见 `07-observability.md`。
 
 ## 文件存储边界
 

@@ -20,3 +20,10 @@
 - RetrievalQuery：检索请求领域对象，包含 query、标签过滤、top_k 和 min_score。
 - RetrievalResult：检索结果领域对象，包含文档、chunk、分数、片段、来源和标签。
 - Management FE：N-KB 提供的简单前端，用于上传文档、管理原文件、查看标签和验证检索。
+- OTel：OpenTelemetry 可观测标准，N-KB 内部观测遵循其 Trace/Metric/Log/Profile 四信号规范，依赖固定 1.45.1 / instrumentation 0.66b1。
+- OTLP：OTel 导出协议，N-KB 经 OTLP/gRPC 将 Trace/Metric/Log 导出到 N-Agent 共享观测栈的 Collector。
+- Semconv：语义约定，N-KB 观测属性命名（如 `nkb.outcome`、`error.type`、`genai.*`）遵循的约定版本，版本号由 `telemetry_semantics.SEMCONV_VERSION` 声明。
+- Trace 串联：N-Agent 调用 N-KB 时经 W3C tracecontext（traceparent/tracestate）传播，使两服务 span 在 Tempo 中呈同一 trace 的直接父子关系。
+- Ring Buffer Span：观测运行时内存保留的最近 100 条已结束 sampled span 摘要（八个固定字段），供 `GET /observations/otel` 自检分页展示。
+- Delivery：自检快照中单信号出口的最近投递状态，取值 disabled/unknown/succeeded/failed；仅表示本进程最近一次导出确认，不代表后端已持久化。
+- Profile：进程 CPU 采样画像，由 py-spy 子进程按窗口采样生成折叠栈，经安全投影上传 Pyroscope；需要 SYS_PTRACE 能力（仅 profiling override）。

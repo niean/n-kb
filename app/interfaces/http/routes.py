@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
-from app.interfaces.http import documents, health, indexing, retrieval
+from app.interfaces.http import documents, health, indexing, observations, retrieval
 from app.interfaces.http.errors import register_error_handlers
 
 
@@ -15,3 +15,4 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(documents.router)
     app.include_router(indexing.router)
     app.include_router(retrieval.router)
+    app.include_router(observations.router)

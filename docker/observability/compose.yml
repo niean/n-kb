@@ -1,0 +1,30 @@
+# 统一观测 Compose override：接入共享观测栈，并提供默认关闭的 Profile 采样配置。
+#
+# 使用方式：由 docker/docker-compose.yml 顶层 include 自动加载，无需额外 -f；
+# 在 docker/.env 设置观测变量后，正常使用 bash docker/restart.sh。
+#
+# 约束：
+# - 只给 n-kb 追加 default 与 external n-agent-observability 两个网络；
+#   Qdrant/Ollama 等后端仍只在 default 网络，不新增后端 depends_on。
+# - external 网络真实名称通过 N_KB_OBS_EXTERNAL_NETWORK 覆盖，默认 n-telemetry；
+#   N-Agent 观测栈位于独立项目 n-observability（n-agent/docker/observability/）。
+# - collector 与 pyroscope endpoint 均可由用户环境变量覆盖，不硬编码覆盖用户配置。
+# - Profile 采样默认关闭。统一文件始终为 n-kb 添加 SYS_PTRACE，但不使用
+#   privileged 或 host PID namespace；应用只采当前 Python PID。
+
+services:
+  n-kb:
+    cap_add:
+      - SYS_PTRACE
+    environment:
+      N_KB_OTEL_EXPORTER_OTLP_ENDPOINT: ${N_KB_OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      N_KB_PROFILING_ENABLED: ${N_KB_PROFILING_ENABLED:-false}
+      N_KB_PROFILING_PYROSCOPE_ENDPOINT: ${N_KB_PROFILING_PYROSCOPE_ENDPOINT:-http://pyroscope:4040}
+    networks:
+      - default
+      - n-agent-observability
+
+networks:
+  n-agent-observability:
+    name: ${N_KB_OBS_EXTERNAL_NETWORK:-n-telemetry}
+    external: true

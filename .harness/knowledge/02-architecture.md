@@ -12,9 +12,9 @@ N-KB 的目标是提供完整知识库产品能力：文档管理、来源管理
 项目严格遵循领域驱动设计 DDD，采用外层依赖内层的方向：Interfaces -> Application -> Domain。Infrastructure 只实现 Domain 定义的端口，并在应用启动时注入。
 
 - Domain 层：定义 Document、KnowledgeSource、Tag、Chunk、EmbeddingVector、IndexJob、RetrievalQuery、RetrievalResult 等核心领域模型和值对象，定义 DocumentRepository、SourceRepository、TagRepository、ChunkRepository、VectorIndex、EmbeddingProvider、DocumentParser、ObjectStore 等端口协议。
-- Application 层：编排文档上传、原文保存、入库索引、标签过滤、文档查询、语义检索和管理用例。LangGraph 属于本层，只负责状态图和流程编排。
-- Infrastructure 层：实现外部依赖细节，包括 SQLite repository、Qdrant vector index、Ollama embedding provider、LlamaIndex parser/index adapter、本地文件存储、配置加载等。
-- Interfaces 层：实现 FastAPI HTTP API、FE 静态资源、请求/响应模型和错误映射。
+- Application 层：编排文档上传、原文保存、入库索引、标签过滤、文档查询、语义检索和管理用例。LangGraph 属于本层，只负责状态图和流程编排。观测语义层（`telemetry_semantics.py`，span/指标/日志语义助手）属于本层，仅依赖 opentelemetry-api，经组合根注入 Infrastructure，不反向依赖。
+- Infrastructure 层：实现外部依赖细节，包括 SQLite repository、Qdrant vector index、Ollama embedding provider、LlamaIndex parser/index adapter、本地文件存储、配置加载等。OTel 观测运行时（`app/infrastructure/observability/`：setup/instrumentors/logging/sanitizer/profiling/snapshots）属于本层，不反向 import Application；语义常量与助手经组合根参数注入。
+- Interfaces 层：实现 FastAPI HTTP API、FE 静态资源、请求/响应模型和错误映射。观测自检 API（observations.py）是只读协议适配，仅消费组合根注入的 snapshot callable。
 
 ## 模块边界
 
@@ -37,6 +37,7 @@ N-KB 的目标是提供完整知识库产品能力：文档管理、来源管理
 - Management FE：服务本地文档上传、列表、详情、标签过滤、索引状态查看和检索验证。
 - Public HTTP API：服务 N-Agent 和其它调用方，提供稳定的文档、标签、入库、检索接口。
 - MCP Interface Adapter：作为 Interfaces 层协议适配，通过 FastMCP 暴露检索与状态 tools，支持 Streamable HTTP 和 stdio 双入口，复用 Application 层检索服务和健康检查服务，不直接访问 Infrastructure；N-KB 不支持旧版 SSE transport。
+- Observability：OTel 四信号（Trace/Metric/Log/Profile）内部观测，运行时位于 Infrastructure observability 模块，语义层位于 Application，装配唯一入口为组合根 `start_observability`，HTTP 与 stdio 双入口复用；导出到 N-Agent 共享观测栈（OTLP Collector/Tempo/Prometheus/Loki/Pyroscope），N-Agent 到 N-KB 的调用经 W3C tracecontext 串联为单 Trace。禁用时零 SDK 装配。本地指标与日志摘要均有界、无持久化；四信号外链在 Interfaces 纯函数生成，沿用 N-Agent Explore 和数据源契约，细则见 `07-observability.md`。
 
 ## 服务边界
 

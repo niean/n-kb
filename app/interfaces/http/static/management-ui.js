@@ -5,6 +5,57 @@
     return document.getElementById(id);
   }
 
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString('zh-CN');
+  }
+
+  // N-Agent 页码窗口组件；page/pages 均来自服务端，组件不访问 API。
+  function buildPager(page, pages, onPageChange, total, pageSize) {
+    const current = Math.max(1, Math.min(10, Number(page) || 1));
+    const totalPages = Math.max(0, Math.min(10, Number(pages) || 0));
+    const size = Math.max(1, Number(pageSize) || 10);
+    const count = Math.max(0, Number(total) || 0);
+    const pager = el('div', 'observations-pager');
+    const info = el('span', 'observations-pager__info');
+    if (!totalPages || !count) info.textContent = '暂无记录';
+    else info.textContent = `第 ${(current - 1) * size + 1}-${Math.min(current * size, count)} 条 / 共 ${count} 条`;
+    pager.appendChild(info);
+    const controls = el('div', 'observations-pager__ctrl');
+    function pageButton(label, target, disabled, primary) {
+      const button = el('button', `btn${primary ? ' btn--primary' : ''}`, label);
+      button.type = 'button';
+      button.disabled = disabled;
+      if (disabled) button.classList.add('btn--disabled');
+      button.setAttribute('aria-label', label === '<' ? '上一页' : label === '>' ? '下一页' : `第 ${label} 页`);
+      button.addEventListener('click', () => {
+        if (!disabled && Number.isInteger(target) && target >= 1 && target <= totalPages) onPageChange(target);
+      });
+      controls.appendChild(button);
+    }
+    pageButton('<', current - 1, current <= 1 || !totalPages, false);
+    const candidates = new Set([1, totalPages, current - 1, current, current + 1]);
+    const visible = [...candidates].filter((value) => value >= 1 && value <= totalPages).sort((a, b) => a - b);
+    let previous = 0;
+    visible.forEach((value) => {
+      if (previous && value - previous > 1) controls.appendChild(el('span', 'observations-pager__dots', '...'));
+      pageButton(String(value), value, false, value === current);
+      previous = value;
+    });
+    pageButton('>', current + 1, current >= totalPages || !totalPages, false);
+    pager.appendChild(controls);
+    return pager;
+  }
+
   function clear(element) {
     element.replaceChildren();
   }
@@ -91,6 +142,9 @@
   window.NKB.ui = {
     byId,
     clear,
+    el,
+    formatDateTime,
+    buildPager,
     parseTags,
     vdbStatusText,
     statusClass,

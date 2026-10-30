@@ -40,6 +40,32 @@ def test_pyproject_pins_mcp_below_v2() -> None:
     )
 
 
+OTEL_PINNED_DEPENDENCIES = {
+    "opentelemetry-api": "1.45.1",
+    "opentelemetry-sdk": "1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc": "1.45.1",
+    "opentelemetry-instrumentation-fastapi": "0.66b1",
+    "opentelemetry-instrumentation-httpx": "0.66b1",
+    "opentelemetry-instrumentation-sqlite3": "0.66b1",
+}
+
+
+def test_pyproject_pins_otel_observability_dependencies() -> None:
+    """spec 六项 OTel 依赖必须精确 pin。
+
+    版本来源 N-Agent 已验证安装集合（opentelemetry-api/sdk/exporter-otlp-proto-grpc
+    ==1.45.1，instrumentation-fastapi/httpx/sqlite3 ==0.66b1），非本仓独立验证事实。
+    """
+    dependencies = _load_dependencies()
+
+    for name, version in OTEL_PINNED_DEPENDENCIES.items():
+        spec = _select_dependency(dependencies, name)
+        expected = f"{name}=={version}"
+        assert spec == expected, (
+            f"{name} must be pinned exactly to {expected!r} for observability; got {spec!r}"
+        )
+
+
 def test_fastapi_testclient_imports_without_deprecation_warning() -> None:
     result = subprocess.run(
         [sys.executable, "-W", "error", "-c", "from fastapi.testclient import TestClient"],
@@ -49,3 +75,7 @@ def test_fastapi_testclient_imports_without_deprecation_warning() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_system_metrics_matches_nagent_instrumentation_version():
+    assert _select_dependency(_load_dependencies(), 'opentelemetry-instrumentation-system-metrics') == 'opentelemetry-instrumentation-system-metrics==0.66b1'

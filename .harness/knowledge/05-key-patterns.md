@@ -103,3 +103,26 @@ FE 展示文档标题、原文、来源、标签、chunk 文本和检索片段�
 管理页采用 Dashboard-first 控制台：概览展示文档/入库/依赖状态，文档页负责上传、过滤、详情、原文和只读 chunk 可视化，检索页负责 query/top_k/min_score/过滤条件验证，健康页展示依赖状态；静态资源按职责拆分为 app shell、Design Token 样式、HTTP API helper、安全 UI helper、hash 导航和页面入口脚本；组件、布局、视觉和交互细则见 `.harness/framework/guides/10-guidelines-fe.md`。
 
 陷阱：Markdown 原文和 chunk 文本默认按文本展示；如果后续支持 Markdown 预览，必须引入 sanitizer。chunk 可视化是只读调试能力，不应在 FE 中直接编辑 SQLite/Qdrant 数据。
+
+## 模式十：观测装配与安全投影
+
+观测启动统一收敛到组合根 `app/composition.py` 的 `start_observability`：setup_observability -> 全局 instrumentors -> prepare_sanitizer -> 业务完成日志事件登记 -> 日志 handler -> Profile 采样器。HTTP（main.py lifespan）与 stdio（mcp_stdio.py main）两入口复用同一装配，禁用返回 None 且零观测 import；观测失败降级不阻断业务启动。
+
+非组合根模块不得直接 import `app.infrastructure` 符号：Interfaces 需要的实现（如 `suppress_client_spans` 抑制作用域、`observation_snapshot` 快照 callable）一律由组合根以函数内延迟 import 解析后经参数注入（`SuppressScopeFactory` 等 Callable 合同）；Application 语义层（`telemetry_semantics`）只依赖 opentelemetry-api，经 `embedding_observer`、`semantics=` 参数注入 Infrastructure，Infrastructure 不反向 import Application。
+
+观测日志与详情采用统一Prepared脱敏和预算：注册模板用于稳定分类，普通应用/库/异常日志保留安全可读内容；Span属性/Event/OTLP复用同次投影，本地ring仅保留事实。完整文件、完整向量与凭据禁采，详见07-observability.md。
+
+陷阱：观测包装不得改变业务返回值或异常传播（助手全部静默隔离）；dbapi 埋点只拦截 `.cursor()` 派生游标，SQLite 直连 `connection.execute` 对埋点不可见；不把 exporter succeeded 呈现为后端已持久化。
+
+## 模式十一：管理页 OTel 生命周期
+
+`management-navigation.js` 先完成 hash 路由、容器和菜单状态更新，再回调 `app.js`；app 离开 `#observations-otel` 时调用 `deactivate`，进入时调用 `init`。旧 `#observations` 通过 replaceState 规范化，重复叶子切换不重复加载。侧栏折叠偏好与观测子菜单偏好独立，折叠浮层的 hover/focus/click 仅改变临时可见状态，并同步 hidden 与 aria-expanded。
+
+`observations-otel.js` 持有 active、当前页和递增请求 token，只有最新且仍激活的请求可更新 DOM、错误、分页和最后更新时间。`init` 回第一页，`refresh` 保持当前页，重试捕获失败页；响应越界只纠页一次，连续缩页显示回第一页。所有快照字段安全文本渲染，Grafana 链接仅用绝对 http/https URL 并拒绝 userinfo，不发起额外外部探测。
+
+
+## 模式十二：本地摘要与共享 Grafana
+
+观测日志与详情采用统一Prepared脱敏和预算：注册模板用于稳定分类，普通应用/库/异常日志保留安全可读内容；Span属性/Event/OTLP复用同次投影，本地ring仅保留事实。完整文件、完整向量与凭据禁采，详见07-observability.md。
+
+Grafana链接沿用N-Agent服务端Explore panes；固定UID和数据源在共享栈配置，保留反向代理子路径和重复非冲突query，不向未知Trace入口拼traceId。前端失败保留最近成功快照并标时间，deactivate废弃旧请求。配置与采集矩阵见 `07-observability.md`。

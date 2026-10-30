@@ -105,6 +105,7 @@ bash docker/restart.sh
 | .harness/knowledge/04-data-boundaries.md | 涉及文档、标签、chunk、embedding、SQLite、Qdrant 数据结构时 |
 | .harness/knowledge/05-key-patterns.md | 实现上传入库、检索、依赖注入、外部适配器等跨文件流程时 |
 | .harness/knowledge/06-domain-model.md | 需要快速理解 DDD 领域模型、聚合、值对象、端口与核心业务流时 |
+| .harness/knowledge/07-observability.md | 修改观测埋点、安全摘要、四信号外链与共享 Grafana 配置时 |
 | .harness/knowledge/21-glossary.md | 对知识库、RAG、标签、来源、索引等术语不清楚时 |
 | .harness/knowledge/22-file-map.md | 确定功能对应源文件时 |
 | .harness/prd/02-prd-baseline.md | 确认功能需求与产品约束时 |

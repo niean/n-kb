@@ -46,6 +46,19 @@
   - 前端：左导样式优化，包括左导栏宽度、字体大小、图标大小，设置调整、使跟n-agent一致。n-agent /Users/niean/code/github.com/niean/n-agent
   - 前端：左导样式优化，检索、健康两个菜单间增加分隔符。使用迭代功能WF、三方审阅使用cc
 
+[20261029]
+- FR
+  - 观测：[KF]补全OTel可观测。按照业界规范，给N-KB补全内部观测，要求遵循OTel规范，你应该严格参考N-Agent的规范、方案、教训；同时，我希望N-Agent访问N-KB能够Trace串起来
+    - 迭代：观测组件拆分为独立网络空间，compose配置请同步修改
+    - 迭代：观测，跟N-Agent对比，包括左导菜单图标、层级、OTel页面样式+FE组件，不要自己造轮子。你先学习N-Agent，然后按照流程执行、免人工审批
+    - 迭代：docker，观测相关的配置放到目录 docker/observability/ 下
+    - 迭代：n-kb，补全OTel观测缺失，包括OTel页面中缺少的、Grafana大盘配置等；Grafana大盘配置，可以放到n-agent的docker/observability/目录
+    - 迭代：Trace，属性缺少必要的payload参数，也缺少事件关联；Log，缺少payload参数、结果等信息。跟N-Agent的早期版本问题很像，参考它的经验、丰富信息
+
+[20261031]
+- FR
+  - 前端：左导菜单，字体大小调整、跟N-Agent左导一致
+  - 观测：OTel页面，页面内容块、字段等，要跟N-Agent OTel页面严格一致
 
 ---
 

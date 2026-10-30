@@ -1,8 +1,15 @@
+import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from app.application import telemetry_semantics as ts
 from app.application.ingestion_service import IngestionService
 from app.domain.chunk import Chunk
 from app.domain.document import Document, DocumentContent, DocumentSource, DocumentStatus
@@ -439,3 +446,267 @@ def test_sensitive_exception_message_is_not_persisted(document, content):
     assert stored_error == "RuntimeError"
     assert "secret-token-123" not in stored_error
     assert "second line with private notes" not in stored_error
+
+
+# ---------------------------------------------------------------------------
+# T8: nkb.index.run 与四阶段操作语义
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def span_exporter():
+    """T2/T7 既定模式：附加到现有全局 SDK provider，或设置自有 provider。"""
+    exporter = InMemorySpanExporter()
+    processor = SimpleSpanProcessor(exporter)
+    from opentelemetry import trace as trace_api
+
+    provider = trace_api.get_tracer_provider()
+    if provider is None or type(provider).__name__ in ("ProxyTracerProvider",):
+        owning = TracerProvider()
+        owning.add_span_processor(processor)
+        trace_api.set_tracer_provider(owning)
+    else:
+        try:
+            provider.add_span_processor(processor)
+        except Exception:
+            pass
+    return exporter
+
+
+def _make_service(
+    document=None,
+    content=None,
+    tags=None,
+    chunk_repository=None,
+    vector_index=None,
+    embedding_provider=None,
+    document_repository=None,
+    document_parser=None,
+):
+    document_repository = document_repository or FakeDocumentRepository(
+        document=document, content=content, tags=tags or []
+    )
+    return IngestionService(
+        document_repository=document_repository,
+        chunk_repository=chunk_repository or FakeChunkRepository(),
+        index_job_repository=FakeIndexJobRepository(),
+        document_parser=document_parser or FakeParser(),
+        text_splitter=FakeSplitter(),
+        embedding_provider=embedding_provider or FakeEmbeddingProvider(),
+        vector_index=vector_index or FakeVectorIndex(),
+    )
+
+
+INDEX_SPAN_NAMES = {
+    "nkb.index.run",
+    "nkb.index.parse",
+    "nkb.index.split",
+    "nkb.index.embed",
+    "nkb.index.write",
+}
+
+
+def _index_spans(span_exporter):
+    return [
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name in INDEX_SPAN_NAMES
+    ]
+
+
+def test_index_document_wraps_run_and_four_stage_spans(span_exporter, document, content):
+    span_exporter.clear()
+    service = _make_service(document=document, content=content)
+
+    job = service.index_document("doc-1")
+
+    assert job.status == IndexJobStatus.SUCCEEDED
+    spans = _index_spans(span_exporter)
+    names = [span.name for span in spans]
+    assert set(names) == INDEX_SPAN_NAMES
+    run = next(span for span in spans if span.name == "nkb.index.run")
+    stages = [span for span in spans if span.name != "nkb.index.run"]
+    assert [span.name for span in stages] == [
+        "nkb.index.parse",
+        "nkb.index.split",
+        "nkb.index.embed",
+        "nkb.index.write",
+    ]
+    for span in spans:
+        assert span.context.trace_id == run.context.trace_id
+        if span is not run:
+            assert span.parent.span_id == run.context.span_id
+            assert span.attributes["nkb.outcome"] == "success"
+    span_ids = [span.context.span_id for span in spans]
+    assert len(span_ids) == len(set(span_ids))
+    assert run.attributes["nkb.document_id"] == "doc-1"
+    assert run.attributes["nkb.chunk_count"] == 2
+    assert run.attributes["nkb.outcome"] == "success"
+    dumped = json.dumps(
+        [(span.name, span.attributes) for span in spans], default=str
+    )
+    assert "hello world" not in dumped
+
+
+def test_index_document_records_index_once_while_run_current(
+    span_exporter, document, content, monkeypatch
+):
+    span_exporter.clear()
+    calls = []
+    current_names = []
+
+    def spy(outcome, **kwargs):
+        calls.append((outcome, kwargs))
+        current = trace.get_current_span()
+        current_names.append(current.name if current is not None else None)
+
+    monkeypatch.setattr(ts, "record_index", spy)
+    service = _make_service(document=document, content=content)
+
+    service.index_document("doc-1")
+
+    assert len(calls) == 1
+    outcome, kwargs = calls[0]
+    assert outcome == ts.OUTCOME_SUCCESS
+    assert kwargs["chunk_count"] == 2
+    assert current_names == ["nkb.index.run"]
+
+
+def test_missing_document_records_error_once_without_stage_spans(
+    span_exporter, document
+):
+    span_exporter.clear()
+    service = _make_service(document=document, content=None)
+
+    with pytest.raises(ValueError, match="document_not_found"):
+        service.index_document("doc-1")
+
+    spans = _index_spans(span_exporter)
+    assert [span.name for span in spans] == ["nkb.index.run"]
+    run = spans[0]
+    assert run.attributes["nkb.outcome"] == "error"
+    assert run.attributes["error.type"] == "other"
+    assert "nkb.chunk_count" not in run.attributes
+
+
+def test_parse_failure_marks_stage_and_run_error_without_leaking_message(
+    span_exporter, document, content
+):
+    span_exporter.clear()
+
+    class FailingParser(FakeParser):
+        def parse(self, filename, content):
+            raise RuntimeError("secret-parse-failure private detail")
+
+    service = _make_service(
+        document=document,
+        content=content,
+        document_parser=FailingParser(),
+    )
+
+    with pytest.raises(RuntimeError, match="secret-parse-failure"):
+        service.index_document("doc-1")
+
+    spans = _index_spans(span_exporter)
+    names = [span.name for span in spans]
+    assert "nkb.index.parse" in names
+    assert "nkb.index.split" not in names
+    parse = next(span for span in spans if span.name == "nkb.index.parse")
+    assert parse.attributes["nkb.outcome"] == "error"
+    assert parse.attributes["error.type"] == "other"
+    run = next(span for span in spans if span.name == "nkb.index.run")
+    assert run.attributes["nkb.outcome"] == "error"
+    dumped = json.dumps([(span.name, span.attributes) for span in spans], default=str)
+    assert "secret-parse-failure" not in dumped
+    assert "private detail" not in dumped
+
+
+def test_rollback_failure_counts_error_once(span_exporter, document, content):
+    span_exporter.clear()
+
+    class FlakyChunkRepository(FakeChunkRepository):
+        def __init__(self):
+            super().__init__()
+            self.replace_calls = 0
+
+        def replace_chunks(self, document_id, chunks):
+            self.replace_calls += 1
+            if self.replace_calls >= 2:
+                raise RuntimeError("restore_failed_secret")
+            self.replaced.append((document_id, list(chunks)))
+
+    class FailingVectorIndex(FakeVectorIndex):
+        def replace_document(self, document_id, chunks, vectors, tags, source):
+            raise RuntimeError("qdrant_unavailable")
+
+    chunk_repository = FlakyChunkRepository()
+    service = _make_service(
+        document=document,
+        content=content,
+        chunk_repository=chunk_repository,
+        vector_index=FailingVectorIndex(),
+    )
+
+    with pytest.raises(RuntimeError, match="qdrant_unavailable"):
+        service.index_document("doc-1")
+
+    assert chunk_repository.replace_calls == 2
+    spans = _index_spans(span_exporter)
+    write = next(span for span in spans if span.name == "nkb.index.write")
+    assert write.attributes["nkb.outcome"] == "error"
+    run = next(span for span in spans if span.name == "nkb.index.run")
+    assert run.attributes["nkb.outcome"] == "error"
+    assert "nkb.chunk_count" not in run.attributes
+
+
+def test_cancelled_during_embed_propagates_and_counts_once(
+    span_exporter, document, content, monkeypatch
+):
+    span_exporter.clear()
+
+    class CancellingEmbeddingProvider(FakeEmbeddingProvider):
+        def embed_chunks(self, chunks):
+            raise asyncio.CancelledError()
+
+    calls = []
+
+    def spy(outcome, **kwargs):
+        calls.append((outcome, kwargs))
+
+    monkeypatch.setattr(ts, "record_index", spy)
+    document_repository = FakeDocumentRepository(
+        document=document, content=content, tags=[]
+    )
+    service = _make_service(
+        document_repository=document_repository,
+        embedding_provider=CancellingEmbeddingProvider(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        service.index_document("doc-1")
+
+    assert len(calls) == 1
+    assert calls[0][0] == ts.OUTCOME_CANCELLED
+    spans = _index_spans(span_exporter)
+    embed = next(span for span in spans if span.name == "nkb.index.embed")
+    assert embed.attributes["nkb.outcome"] == "cancelled"
+    run = next(span for span in spans if span.name == "nkb.index.run")
+    assert run.attributes["nkb.outcome"] == "cancelled"
+    assert "error.type" not in run.attributes
+    # 取消不进入既有 except Exception 失败收尾：状态停留在 INDEXING。
+    assert document_repository.status_updates == [("doc-1", DocumentStatus.INDEXING)]
+
+
+def test_index_helper_fault_does_not_change_business_result(
+    document, content, monkeypatch
+):
+    def broken(*args, **kwargs):
+        raise RuntimeError("telemetry exploded")
+
+    monkeypatch.setattr(ts.trace, "get_tracer", broken)
+    monkeypatch.setattr(ts, "record_index", broken)
+    service = _make_service(document=document, content=content)
+
+    job = service.index_document("doc-1")
+
+    assert job.status == IndexJobStatus.SUCCEEDED

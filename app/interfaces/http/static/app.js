@@ -1,7 +1,8 @@
-const { api, ui, navigation } = window.NKB;
+const { api, ui, navigation, observationsOtel } = window.NKB;
 const {
   byId,
   clear,
+  formatDateTime,
   parseTags,
   vdbStatusText,
   statusClass,
@@ -37,13 +38,6 @@ function renderStats(target, stats) {
     card.append(label, value, sub);
     target.appendChild(card);
   });
-}
-
-function formatDateTime(value) {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('zh-CN');
 }
 
 function healthEntries(health) {
@@ -339,7 +333,10 @@ async function loadAll() {
 }
 
 function init() {
-  navigation.initNavigation();
+  navigation.initNavigation(({ previous, current }) => {
+    if (previous === 'observations-otel') observationsOtel.deactivate();
+    if (current === 'observations-otel') observationsOtel.init();
+  });
   byId('refresh-health').addEventListener('click', loadHealth);
   byId('refresh-documents').addEventListener('click', loadDocuments);
   byId('upload-form').addEventListener('submit', uploadDocument);

@@ -294,3 +294,110 @@ def test_delete_document_cleans_vectors_files_and_repository(repository):
 def test_delete_missing_document_raises_document_not_found(service):
     with pytest.raises(ValueError, match="document_not_found"):
         service.delete_document("missing")
+
+
+# ---------------------------------------------------------------------------
+# T8: nkb.document.upload 操作语义
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def span_exporter():
+    """T2/T7 既定模式：附加到现有全局 SDK provider，或设置自有 provider。"""
+    import opentelemetry.trace as otel_trace
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+    exporter = InMemorySpanExporter()
+    processor = SimpleSpanProcessor(exporter)
+    provider = otel_trace.get_tracer_provider()
+    if provider is None or type(provider).__name__ in ("ProxyTracerProvider",):
+        owning = SDKTracerProvider()
+        owning.add_span_processor(processor)
+        otel_trace.set_tracer_provider(owning)
+    else:
+        try:
+            provider.add_span_processor(processor)
+        except Exception:
+            pass
+    return exporter
+
+
+def _upload_spans(span_exporter):
+    from app.application.document_service import UPLOAD_SPAN_NAME
+
+    return [
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == UPLOAD_SPAN_NAME
+    ]
+
+
+def test_upload_document_emits_upload_operation_span(service, span_exporter):
+    import json
+
+    span_exporter.clear()
+    command = UploadDocumentCommand(
+        filename="prd.md",
+        content=b"# PRD secret-upload-body",
+        source="Product Requirements",
+        tags="category=prd",
+    )
+
+    document = service.upload_document(command)
+
+    assert document.title == "prd.md"
+    spans = _upload_spans(span_exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.attributes["nkb.outcome"] == "success"
+    dumped = json.dumps(span.attributes, default=str)
+    assert "secret-upload-body" not in dumped
+
+
+def test_upload_validation_failure_span_error_type_without_content_leak(
+    service, span_exporter
+):
+    import json
+
+    span_exporter.clear()
+
+    with pytest.raises(ValueError, match="unsupported_file_type"):
+        service.upload_document(
+            UploadDocumentCommand(
+                filename="image.png",
+                content=b"secret-png-bytes",
+                source=None,
+                tags=None,
+            )
+        )
+
+    spans = _upload_spans(span_exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.attributes["nkb.outcome"] == "error"
+    assert span.attributes["error.type"] == "unsupported_file_type"
+    dumped = json.dumps(span.attributes, default=str)
+    assert "secret-png-bytes" not in dumped
+
+
+def test_upload_helper_fault_does_not_change_business_result(service, monkeypatch):
+    from app.application import telemetry_semantics as ts
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("telemetry exploded")
+
+    monkeypatch.setattr(ts.trace, "get_tracer", broken)
+    command = UploadDocumentCommand(
+        filename="doc.md",
+        content=b"body",
+        source=None,
+        tags=None,
+    )
+
+    document = service.upload_document(command)
+
+    assert document.title == "doc.md"

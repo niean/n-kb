@@ -60,6 +60,14 @@
     return fetchJson('/health/dependencies');
   }
 
+  // 自检快照分页读取：size 固定 10（后端仅接受 10），page 取 1..10
+  function getObservationsOtel(page) {
+    const params = new URLSearchParams();
+    params.set('page', String(Number(page) || 1));
+    params.set('size', '10');
+    return fetchJson(`/observations/otel?${params.toString()}`);
+  }
+
   global.NKB = namespace;
   window.NKB.api = {
     fetchJson,
@@ -73,5 +81,6 @@
     uploadDocument,
     searchRetrieval,
     getDependencyHealth,
+    getObservationsOtel,
   };
 }(window));

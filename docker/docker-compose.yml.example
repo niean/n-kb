@@ -1,9 +1,25 @@
 name: n-kb
 
+include:
+  - observability/compose.yml
+
 # Docker Compose 配置样例。
 # 使用方式：cp docker/docker-compose.yml.example docker/docker-compose.yml，按本地环境调整后执行 bash docker/restart.sh。
 # docker/docker-compose.yml 已被 .gitignore 忽略，本地个人路径不要提交。
 # 宿主机挂载目录可通过 docker/.env 覆盖，默认值均为项目内相对路径。
+#
+# 部署说明（环境变量传入）：
+# 1. cp docker/.env.example docker/.env，按需修改取值；
+# 2. 用 --env-file docker/.env 合并启动，例如在仓库根目录：
+#    docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+# 3. .env 中的应用配置类变量只有通过下方 environment 映射传入容器才会生效，仅写 .env 插值
+#    不等于传入容器（挂载路径类插值变量除外，见 .env.example 注释）；
+# 4. 顶层 include 自动加载 docker/observability/compose.yml，restart.sh 无需额外 -f 参数；
+#    通过 N_KB_OBS_EXTERNAL_NETWORK 指定 N-Agent 侧 external 网络名（当前为 n-telemetry）。
+#    观测文件同时携带默认关闭的 Profile 配置与 SYS_PTRACE。
+#
+# 观测配置默认与 app/config.py 的 Settings 一致：总开关关闭、endpoint 为空、
+# 普通部署安装 py-spy 但不开启采样，观测网络仅在 override 中追加。
 
 services:
   n-kb:
@@ -27,9 +43,21 @@ services:
       N_KB_MCP_NAME: ${N_KB_MCP_NAME:-N-KB MCP}
       N_KB_MCP_ALLOWED_HOSTS: ${N_KB_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,nkb.localhost,nkb.localhost:*,n-kb,n-kb:*}
       N_KB_MCP_ALLOWED_ORIGINS: ${N_KB_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*,http://[::1]:*,http://nkb.localhost,http://nkb.localhost:*,http://n-kb,http://n-kb:*}
+      N_KB_OTEL_ENABLED: ${N_KB_OTEL_ENABLED:-false}
+      N_KB_OTEL_TRACES_SAMPLE_RATIO: ${N_KB_OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      N_KB_OTEL_CONTENT_MAX_BYTES: ${N_KB_OTEL_CONTENT_MAX_BYTES:-2048}
+      N_KB_OTEL_GRAFANA_BASE_URL: ${N_KB_OTEL_GRAFANA_BASE_URL:-}
+      N_KB_OTEL_GRAFANA_TRACES_BASE_URL: ${N_KB_OTEL_GRAFANA_TRACES_BASE_URL:-}
+      N_KB_OTEL_GRAFANA_METRICS_BASE_URL: ${N_KB_OTEL_GRAFANA_METRICS_BASE_URL:-}
+      N_KB_OTEL_GRAFANA_LOGS_BASE_URL: ${N_KB_OTEL_GRAFANA_LOGS_BASE_URL:-}
+      N_KB_OTEL_GRAFANA_PROFILE_BASE_URL: ${N_KB_OTEL_GRAFANA_PROFILE_BASE_URL:-}
+      N_KB_PROFILING_ENABLED: ${N_KB_PROFILING_ENABLED:-false}
+      N_KB_PROFILING_INTERVAL_SECONDS: ${N_KB_PROFILING_INTERVAL_SECONDS:-60}
     volumes:
       - ../locals:/app/locals
       - ../data:/app/data
+    # 观测导出为后台批处理，停机时给 flush 留出时间；基础样例与观测组合均不低于 10 秒。
+    stop_grace_period: 15s
     cpus: 1
     mem_limit: 1024m
     depends_on:

@@ -13,6 +13,15 @@ dependencies = [
     # mcp 2.x 移除了 mcp.server.fastmcp（重命名为 MCPServer），
     # 代码仍按 v1 API 编写，因此必须 pin 到 v1。
     "mcp>=1.27,<2",
+    # 观测依赖：精确 pin 到 N-Agent 已验证集合（api/sdk/exporter ==1.45.1，
+    # instrumentation ==0.66b1），避免上游破坏性升级。
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "opentelemetry-instrumentation-sqlite3==0.66b1",
+    "opentelemetry-instrumentation-system-metrics==0.66b1",
 ]
 
 [project.optional-dependencies]
