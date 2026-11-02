@@ -244,7 +244,7 @@ function fetch(url, options) {
 // ---------------------------------------------------------------------------
 function buildDom() {
   const tabs = ['overview', 'documents', 'retrieval', 'health', 'observations-otel'];
-  const labels = { overview: '概览', documents: '文档', retrieval: '检索', health: '健康', 'observations-otel': 'OTel' };
+  const labels = { overview: '概览', documents: '文档', retrieval: '检索', health: '组件', 'observations-otel': 'OTel' };
   const sidebar = new FakeElement('aside');
   sidebar.id = 'app-sidebar';
   const group = new FakeElement('div');
@@ -261,12 +261,13 @@ function buildDom() {
   tabs.forEach((tab, index) => {
     const anchor = new FakeElement('a');
     anchor.className = 'sidebar__item' + (index === 0 ? ' sidebar__item--active' : '');
+    if (tab === 'health' || tab === 'observations-otel') anchor.className += ' sidebar__item--child';
     anchor.dataset.tab = tab;
     const label = new FakeElement('span');
     label.className = 'sidebar__item-label';
     label.textContent = labels[tab];
     anchor.appendChild(label);
-    if (tab === 'observations-otel') submenu.appendChild(anchor);
+    if (tab === 'health' || tab === 'observations-otel') submenu.appendChild(anchor);
     else sidebar.appendChild(anchor);
   });
   sidebar.appendChild(group);

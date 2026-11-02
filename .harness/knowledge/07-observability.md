@@ -42,7 +42,7 @@ Application的telemetry_details统一11项详情信封、ContextVar现场与预�
 
 Explore使用nagent-tempo原生panes和TraceQL resource.service.name/service.instance.id。仅有效非零32位Trace ID生成traceId深链；未采样的有效ID不保证后端存在数据。Profile按实际上传service_name查询，为服务级，不伪造实例或逐Trace关联。
 
-大盘配置位于相邻N-Agent仓库`docker/observability/grafana/provisioning/dashboards/nkb-*.json`。指标映射及证据见该仓库`docker/observability/nkb-metric-name-mapping.md`。自动测试仅证明静态配置/隔离SDK合同；真实后端四信号连通与关联按本任务verify清单人工验收，未运行不得宣称已接通。
+大盘配置位于相邻N-Agent仓库`docker/observability/grafana/provisioning/dashboards/nkb-*.json`。指标映射及证据见该仓库`docker/observability/nkb-metric-name-mapping.md`。overview大盘布局契约只覆盖两侧共享的头部区域（前11个面板gridPos），reference在共享区之后新增的领域面板不镜像；自动测试仅证明静态配置/隔离SDK合同；真实后端四信号连通与关联按本任务verify清单人工验收，未运行不得宣称已接通。
 
 ## FastAPI 路由树与远端 Trace
 

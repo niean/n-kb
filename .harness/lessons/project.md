@@ -39,3 +39,9 @@ AI 自主维护，人工可通过提示或建议触发新增/修正。
 - 教训：遍历业务路由使用公开iter_route_contexts取得带完整prefix的方法/模板，兼容早期effective_route_contexts和平铺版本；传播测试必须覆盖实际include_router/嵌套prefix，并在运行容器版本做真实SDK/ASGI复现。应先检查SERVER是否创建，再判断上游是否漏传traceparent。
 - 来源：2026-10-30 联合调试04a0c0087de9bb79f59ad7704a7f2889与fd4ee364ceeae4857191d37a016fdb97；容器修前复现0SERVER，本地新增回归先失败后通过。
 - 验证补充：本轮新增5个回归case，全部672 passed/2 skipped；修复镜像重建与健康检查通过。实际跨容器Tempo诊断链9240565fe85932e803071738e6e44b61证明双服务同Trace且CLIENT→SERVER直接父子关系正确。
+
+### P006: 跨仓共享资产的对比测试必须把契约范围限定在共享前缀
+- 现象：test_dashboard_layout_components_and_filters_match_nagent在干净main上失败，nagent-overview.json未动过N-KB侧任何文件。
+- 根因：相邻n-agent提交46b62dc向nagent-overview.json新增2个agent域面板（11->13），N-KB测试将自身前11面板gridPos与reference全量面板比较，长度不等恒不可满足；实际共享头部区域（前11面板）逐项仍对齐，分歧仅在reference新扩展的领域行。
+- 教训：跨仓共享栈的对比测试应显式声明契约覆盖范围（共享前缀/共享行），reference在共享区之后的领域扩展不镜像；否则相邻仓库正常演进就会打破本仓测试，且失败信息（长度差）不指向真实漂移点。
+- 来源：2026-11-02 修复debt-tracker D005；stash验证干净main复现，收窄断言至reference[:11]后6/6通过、全量756 passed。

@@ -130,13 +130,27 @@ def test_management_fe_contains_required_sections_and_script():
     assert "概览" in html
     assert "文档" in html
     assert "检索" in html
-    assert "健康" in html
+    assert "组件" in html
     assert 'href="#overview"' in html
     assert 'href="#documents"' in html
     assert 'href="#retrieval"' in html
     assert 'href="#health"' in html
     assert "检索实验室" not in html
     assert "app.js" in html
+
+
+def test_management_sidebar_moves_health_under_observations_submenu():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+
+    group_start = html.index('data-tab-group="observations"')
+    group_end = html.index('</div>', html.index('submenu-observations'))
+    submenu_block = html[group_start:group_end]
+    assert 'href="#health"' in submenu_block
+    assert "组件" in submenu_block
+    assert 'sidebar__item--child' in submenu_block
+    # 一级菜单不再包含独立健康入口
+    top_level_nav = html[:html.index('data-tab-group="observations"')]
+    assert 'href="#health"' not in top_level_nav
 
 
 def test_management_api_module_exposes_document_retrieval_and_health_helpers():

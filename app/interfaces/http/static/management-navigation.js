@@ -4,7 +4,8 @@
 
   const SIDEBAR_PREF_KEY = 'nkb.sidebar.expanded';
   const SUBMENU_PREF_KEY = 'nkb.sidebar.submenu.observations';
-  const tabNames = ['overview', 'documents', 'retrieval', 'health', 'observations-otel'];
+  const tabNames = ['overview', 'documents', 'retrieval', 'observations-otel', 'health'];
+  const observationTabs = ['observations-otel', 'health'];
   let currentTab = null;
   let onTabChange = null;
   let submenuOpen = true;
@@ -30,7 +31,7 @@
     document.body.classList.toggle('sidebar-expanded', expanded);
     const toggle = document.getElementById('sidebar-toggle');
     if (toggle) toggle.setAttribute('aria-expanded', String(expanded));
-    applySubmenuState(currentTab === 'observations-otel' ? true : readPref(SUBMENU_PREF_KEY));
+    applySubmenuState(observationTabs.includes(currentTab) ? true : readPref(SUBMENU_PREF_KEY));
   }
 
   function syncSubmenuVisibility() {
@@ -79,7 +80,7 @@
     const nav = document.querySelector(`[data-tab="${nextTab}"]`);
     nav.classList.add('sidebar__item--active');
     nav.setAttribute('aria-current', 'page');
-    applySubmenuState(nextTab === 'observations-otel' ? true : readPref(SUBMENU_PREF_KEY));
+    applySubmenuState(observationTabs.includes(nextTab) ? true : readPref(SUBMENU_PREF_KEY));
     navigationById('topbar-title').textContent = nav.querySelector('.sidebar__item-label').textContent;
     if (typeof onTabChange === 'function') onTabChange({ previous, current: nextTab });
   }

@@ -116,7 +116,8 @@ def test_dashboard_statistical_contracts_and_mapping(dashboards):
 def test_dashboard_layout_components_and_filters_match_nagent(dashboards):
     reference_overview = json.loads((DASHBOARDS / 'nagent-overview.json').read_text())
     overview = dashboards['overview']
-    assert [p['gridPos'] for p in overview['panels'][:11]] == [p['gridPos'] for p in reference_overview['panels']]
+    # 布局契约只覆盖两侧共享的头部区域（前 11 个面板）；reference 在共享区之后的领域面板不镜像
+    assert [p['gridPos'] for p in overview['panels'][:11]] == [p['gridPos'] for p in reference_overview['panels'][:11]]
     assert all(p['type'] == 'stat' for p in overview['panels'] if '吞吐' in p['title'])
     assert all(p['type'] == 'timeseries' for p in overview['panels'] if '吞吐' not in p['title'])
     reference_variable = reference_overview['templating']['list'][0]

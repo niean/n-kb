@@ -19,7 +19,6 @@
       <a class="sidebar__item" href="#documents" data-tab="documents"><span class="sidebar__item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l5 5v13H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 3v5h5M9 13h6M9 17h6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="sidebar__item-label">文档</span></a>
       <a class="sidebar__item" href="#retrieval" data-tab="retrieval"><span class="sidebar__item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM16.5 16.5 21 21" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="sidebar__item-label">检索</span></a>
       <hr class="sidebar__divider" aria-hidden="true">
-      <a class="sidebar__item" href="#health" data-tab="health"><span class="sidebar__item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 13h4l2-7 4 12 2-5h4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="sidebar__item-label">健康</span></a>
       <div class="sidebar__group" data-tab-group="observations">
         <button class="sidebar__item sidebar__item--parent" type="button" data-menu-parent="observations" aria-controls="submenu-observations" aria-expanded="true" aria-label="观测">
           <span class="sidebar__item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 3v18h18" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 14l3-3 3 3 5-7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -27,6 +26,7 @@
           <span class="sidebar__item-chevron" aria-hidden="true">▸</span>
         </button>
         <div class="sidebar__submenu" id="submenu-observations" data-submenu-of="observations">
+          <a class="sidebar__item sidebar__item--child" href="#health" data-tab="health"><span class="sidebar__item-icon" aria-hidden="true"></span><span class="sidebar__item-label">组件</span></a>
           <a class="sidebar__item sidebar__item--child" href="#observations-otel" data-tab="observations-otel"><span class="sidebar__item-icon" aria-hidden="true"></span><span class="sidebar__item-label">OTel</span></a>
         </div>
       </div>
