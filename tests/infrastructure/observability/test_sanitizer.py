@@ -129,6 +129,7 @@ def test_sanitize_before_truncate_utf8_no_codepoint_break():
 
 
 def test_cjk_5000_chars_is_15000_bytes():
+    configure_details(LogSanitizer().sanitize, 2048)
     item = project_details(error="密" * 5000)["error"]
     assert item["original_bytes"] == 15000
     assert item["truncated"] is True
@@ -286,9 +287,9 @@ def test_flatten_details_uses_nkb_prefix_and_drops_none():
     flat = flatten_details({"error": {"content": "x", "original_bytes": None,
                                       "truncated": True, "incomplete": True,
                                       "observed_bytes": 99}})
-    assert flat["nkb.details.error.observed_bytes"] == 99
-    assert flat["nkb.details.error.content"] == "x"
-    assert "nkb.details.error.original_bytes" not in flat
+    assert flat["nkb.content.error_observed_bytes"] == 99
+    assert flat["nkb.content.error"] == "x"
+    assert "nkb.content.error_original_bytes" not in flat
     assert flatten_details(
         {"unknown": {"content": "x", "original_bytes": 1, "truncated": False}}
     ) == {}

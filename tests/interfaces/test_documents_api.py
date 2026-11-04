@@ -533,7 +533,7 @@ def test_upload_via_api_emits_server_upload_and_index_span_tree(tmp_path, otel_c
     assert run.parent.span_id == server.context.span_id
     assert upload.context.trace_id == server.context.trace_id
     assert run.context.trace_id == server.context.trace_id
-    assert upload.attributes[ts.NKB_OUTCOME] == ts.OUTCOME_SUCCESS
+    assert upload.attributes["nkb.document.outcome"] == ts.OUTCOME_SUCCESS
 
     # 四个阶段 span 依次挂在 run 下，顺序 parse/split/embed/write。
     stage_names = (ts.INDEX_STAGE_SPAN_PREFIX + stage for stage in ts.INDEX_STAGES)
@@ -541,7 +541,7 @@ def test_upload_via_api_emits_server_upload_and_index_span_tree(tmp_path, otel_c
     assert all(len(found) == 1 for found in stage_spans.values())
     for name, found in stage_spans.items():
         assert found[0].parent.span_id == run.context.span_id
-        assert found[0].attributes[ts.NKB_OUTCOME] == ts.OUTCOME_SUCCESS
+        assert found[0].attributes["nkb.index.outcome"] == ts.OUTCOME_SUCCESS
     run_children = [s for s in spans if s.parent is not None and s.parent.span_id == run.context.span_id]
     ordered_stages = [
         s for s in run_children if s.name.startswith(ts.INDEX_STAGE_SPAN_PREFIX)
@@ -581,7 +581,7 @@ def test_upload_via_api_emits_server_upload_and_index_span_tree(tmp_path, otel_c
     # run span 携带安全结果：document_id 与成功 chunk 数。
     assert run.attributes[ts.NKB_DOCUMENT_ID] == document_id
     assert run.attributes[ts.NKB_CHUNK_COUNT] == 1
-    assert run.attributes[ts.NKB_OUTCOME] == ts.OUTCOME_SUCCESS
+    assert run.attributes["nkb.index.outcome"] == ts.OUTCOME_SUCCESS
 
     # 同 trace、span id 唯一。
     assert {s.context.trace_id for s in spans} == {server.context.trace_id}

@@ -505,7 +505,7 @@ class TestAssembly:
             _settings(otel_enabled=True, otel_exporter_otlp_endpoint=_ENDPOINT),
             sdk_loader=loader,
             semantics=stub,
-            semantics_keys={"outcome": "nkb.outcome", "error_type": "error.type"},
+            semantics_keys={"outcome": "nkb.retrieval.outcome", "error_type": "error.type"},
         )
         snap = handle.snapshot()
         assert json.loads(json.dumps(snap)) == snap
@@ -754,7 +754,7 @@ class TestRingBuffer:
         return setup.setup_observability(
             _settings(otel_enabled=True, otel_exporter_otlp_endpoint=_ENDPOINT),
             sdk_loader=make_enabled_loader(),
-            semantics_keys={"outcome": "nkb.outcome", "error_type": "error.type"},
+            semantics_keys={"outcome": "nkb.retrieval.outcome", "error_type": "error.type"},
         )
 
     def test_only_ended_sampled_spans(self):
@@ -769,11 +769,11 @@ class TestRingBuffer:
         handle = self._handle_with_keys()
         ring = ring_of(handle)
         attrs = {
-            "nkb.outcome": "success",
+            "nkb.retrieval.outcome": "success",
             "error.type": "embedding_failed",
             "http.url": "http://secret.example.com/?q=leak",
             "sensitive.free.text": "y" * 500,
-            "nkb.document_id": "doc-123",
+            "nkb.document.id": "doc-123",
         }
         ring.on_end(make_ended_span(name="x" * 500, attributes=attrs))
         entry = handle.snapshot()["spans"][0]
@@ -792,7 +792,7 @@ class TestRingBuffer:
     def test_without_injected_keys_no_attribute_projection(self):
         handle = make_handle(make_enabled_loader())
         ring = ring_of(handle)
-        ring.on_end(make_ended_span(attributes={"nkb.outcome": "success"}))
+        ring.on_end(make_ended_span(attributes={"nkb.retrieval.outcome": "success"}))
         entry = handle.snapshot()["spans"][0]
         assert entry["outcome"] is None
         assert entry["error_type"] is None
@@ -1274,7 +1274,7 @@ from app.infrastructure.observability import setup
 handle = setup.setup_observability(
     Settings(_env_file=None, otel_enabled=True),
     semantics=ts,
-    semantics_keys={"outcome": ts.NKB_OUTCOME, "error_type": ts.ERROR_TYPE_ATTR},
+    semantics_keys={"outcome": "nkb.retrieval.outcome", "error_type": ts.ERROR_TYPE_ATTR},
 )
 assert handle is not None and handle.status == "healthy", handle.status
 assert handle.snapshot()["mode"] == "local"
@@ -1320,7 +1320,7 @@ class TestRealSdkSmoke:
             line for line in proc.stdout.splitlines() if line.startswith("SMOKE_OK")
         )
         payload = json.loads(marker_line[len("SMOKE_OK"):])
-        assert payload["spans"] == ["nkb.retrieval.search"]
+        assert payload["spans"] == ["retrieval.search"]
         assert payload["shutdown_seconds"] < 5.0
 
 
@@ -1348,16 +1348,19 @@ def test_summary_failure_never_skips_export():
     assert len(exporter.exports) == 1
 
 
-def test_span_detail_attributes_use_injected_projection_and_deep_copy():
-    processor = setup._RingBufferSpanProcessor({'attribute_projector':lambda attrs:{'nkb.result_count':attrs['nkb.result_count']}})
+def test_span_detail_attributes_use_injected_projection_and_deep_copy(monkeypatch):
+    from app.application.telemetry_contract import project_execution_attributes
+    from app.infrastructure.observability import snapshots
+    monkeypatch.setattr(snapshots, "_execution_projector", project_execution_attributes)
+    processor = setup._RingBufferSpanProcessor({'attribute_projector':lambda attrs:{'nkb.retrieval.result_count':attrs['nkb.retrieval.result_count']}})
     span = SimpleNamespace(context=SimpleNamespace(trace_flags=TraceFlags(TraceFlags.SAMPLED),trace_id=1,span_id=2),
                            parent=None,status=None,name='nkb.retrieval.search',start_time=1,end_time=2,
-                           attributes={'nkb.result_count':3,'query':'SECRET'})
+                           attributes={'nkb.retrieval.result_count':3,'query':'SECRET'})
     processor.on_end(span)
     result = processor.snapshot_spans()
-    assert result[0].get('attributes') == {'nkb.result_count':3}
-    result[0]['attributes']['nkb.result_count'] = 99
-    assert processor.snapshot_spans()[0]['attributes']['nkb.result_count'] == 3
+    assert result[0].get('attributes') == {'nkb.retrieval.result_count':3}
+    result[0]['attributes']['nkb.retrieval.result_count'] = 99
+    assert processor.snapshot_spans()[0]['attributes']['nkb.retrieval.result_count'] == 3
 
 
 @pytest.mark.parametrize('endpoint', ['', _ENDPOINT])
@@ -1379,8 +1382,8 @@ def test_real_reader_batch_reused_for_local_and_export_summary(endpoint):
                                        sdk_loader=loader, semantics=semantics)
     provider = loader.set_meter_calls[0]
     meter = provider.get_meter('test')
-    meter.create_histogram(semantics.INSTRUMENT_RETRIEVAL_DURATION, unit='s').record(2.5, {'outcome':'success','query':'SECRET'})
-    meter.create_counter(semantics.INSTRUMENT_RETRIEVAL_REQUESTS).add(4, {'outcome':'success'})
+    meter.create_histogram(semantics.INSTRUMENT_RETRIEVAL_DURATION, unit='s').record(2.5, {'nkb.retrieval.outcome':'success','query':'SECRET'})
+    meter.create_counter(semantics.INSTRUMENT_RETRIEVAL_REQUESTS).add(4, {'nkb.retrieval.outcome':'success'})
     assert provider.force_flush()
     snapshot = handle.snapshot()
     assert snapshot['metric_snapshot']['collection_count'] == 1

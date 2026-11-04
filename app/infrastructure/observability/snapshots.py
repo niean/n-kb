@@ -10,16 +10,18 @@ from collections import deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+_execution_projector = None
+
+
+def configure_execution_projector(projector=None):
+    global _execution_projector
+    _execution_projector = projector
+
+
 _ENUMS = {
-    'outcome': {'success','error','cancelled','other','completed','incomplete'},
-    'nkb.outcome': {'success','error','cancelled','other'},
-    'stage': {'parse','split','embed','write','other'},
-    'error.type': {'unsupported_file_type','file_too_large','embedding_failed','vector_index_failed','sqlite_failed','other'},
-    'gen_ai.operation.name': {'embeddings'}, 'gen_ai.token.type': {'input','output'},
     'state': {'user','system','idle','nice','iowait','irq','softirq','steal','interrupt','dpc','free','used','cached','buffered','shared','slab','inactive','active','wired'},
     'type': {'rss','vms','shared','text','lib','data','dirty','user','system','children_user','children_system','voluntary','involuntary'},
     'direction': {'read','write','receive','transmit'},
-    'operation': {'upload','delete','retrieval','index','parse','split','embed','write','nkb.index.run','nkb.index.parse','nkb.index.split','nkb.index.embed','nkb.index.write','nkb.retrieval.search','nkb.document.upload','nkb.document.delete','nkb.mcp.status','embeddings'},
 }
 
 # Explicit system instruments; device/interface/address dimensions are excluded.
@@ -44,20 +46,27 @@ SYSTEM_INSTRUMENTS = {
 }
 
 
+def _execution(attributes):
+    if _execution_projector is None:
+        return {}
+    try:
+        return dict(_execution_projector(attributes))
+    except Exception:
+        return {}
+
+
 def safe_dimensions(attributes, dimensions):
-    return {key:value for key,value in attributes.items()
-            if key in dimensions and key in _ENUMS and type(value) is str and value in _ENUMS[key]}
+    facts = _execution(attributes)
+    facts.update({key:value for key,value in attributes.items()
+                  if key in _ENUMS and type(value) is str and value in _ENUMS[key]})
+    return {key:value for key,value in facts.items() if key in dimensions}
 
 
 def project_log_attributes(attributes):
-    """Exact safe fact keys; unknown extras and all content disappear."""
-    if not isinstance(attributes, dict):
+    """Strict execution facts and pinned standard transport facts; no content."""
+    if not isinstance(attributes, dict) and not hasattr(attributes, 'items'):
         return {}
-    projected = safe_dimensions(attributes, ('operation','outcome','error.type','stage'))
-    for key in ('duration_ms','nkb.result_count','nkb.chunk_count','result_count','chunk_count'):
-        value = _number(attributes.get(key))
-        if value is not None and value >= 0:
-            projected[key] = value
+    projected = _execution(attributes)
     status = attributes.get('http.response.status_code')
     if type(status) is int and 100 <= status <= 599:
         projected['http.response.status_code'] = status
@@ -70,11 +79,6 @@ def project_log_attributes(attributes):
     port = attributes.get('server.port')
     if type(port) is int and 0 < port <= 65535:
         projected['server.port'] = port
-    caller = attributes.get('nkb.http.caller')
-    if type(caller) is str and len(caller) <= 256 and re.fullmatch(r'app\.[a-zA-Z0-9_.]+:[a-zA-Z0-9_]+', caller.replace('[REDACTED]', 'redacted')):
-        projected['nkb.http.caller'] = caller
-    # Existing HTTP facts have already replaced unknown path segments. Copy
-    # their structure, never bodies, arbitrary extras, raw URLs or exceptions.
     for key in ('http.route', 'url.template'):
         value = attributes.get(key)
         if type(value) is str and value.startswith('/') and len(value) <= 512 and '?' not in value and '#' not in value:
@@ -84,24 +88,11 @@ def project_log_attributes(attributes):
 
 
 def project_span_facts(attributes):
-    """The self-inspection ring remains facts-only after outlet expansion."""
-    from .instrumentors import ALLOWED_AUTO_ATTRIBUTES
-    from .logging import sanitize_text
-    if not isinstance(attributes, dict):
-        return {}
-    allowed = ALLOWED_AUTO_ATTRIBUTES | frozenset((
-        'nkb.outcome','error.type','gen_ai.operation.name','gen_ai.token.type',
-        'nkb.result_count','nkb.chunk_count','gen_ai.usage.input_tokens',
-        'nkb.filter.tags','nkb.filter.source_kind','nkb.filter.document_status',
-        'nkb.filter.min_score','gen_ai.request.model','nkb.document_id'))
-    result = {}
-    for key,value in attributes.items():
-        if key not in allowed:
-            continue
-        if type(value) is str:
-            result[key] = sanitize_text(value)[:512]
-        elif type(value) in (int,float) and math.isfinite(value):
-            result[key] = value
+    """Self inspection retains fixed summaries and facts, never body text."""
+    from .instrumentors import ALLOWED_AUTO_ATTRIBUTES, _filter_attributes
+    result = _filter_attributes({key:value for key,value in attributes.items()
+                                 if key in ALLOWED_AUTO_ATTRIBUTES})
+    result.update(_execution(attributes))
     return result
 
 
@@ -161,7 +152,7 @@ class MetricSnapshot:
                             attrs = dict(point.attributes or {})
                             safe = self._project(attrs, dimensions) if self._project else safe_dimensions(attrs, dimensions)
                             if attrs.get('otel.metrics.overflow') is True:
-                                safe['otel.metrics.overflow'] = True
+                                safe['nkb.metric.overflow'] = True
                             projected = dict(attributes=safe,
                                              overflow=attrs.get('otel.metrics.overflow') is True,
                                              aggregation_temporality=getattr(getattr(data, 'aggregation_temporality', None), 'name', None),

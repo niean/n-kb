@@ -89,8 +89,8 @@ def test_same_prepared_details_reach_stderr_event_and_sdk():
     event = span.events[0]
     sdk = exporter.get_finished_logs()[0].log_record
     assert event.name == 'execution_completed'
-    assert payload['details']['retrieval_input']['content'] == event.attributes['nkb.details.retrieval_input.content']
-    assert sdk.attributes['nkb.details.retrieval_input.content'] == event.attributes['nkb.details.retrieval_input.content']
+    assert payload['details']['retrieval_input']['content'] == event.attributes['nkb.content.retrieval_input']
+    assert sdk.attributes['nkb.content.retrieval_input'] == event.attributes['nkb.content.retrieval_input']
     assert sdk.span_id == span.context.span_id
     assert payload['span_id'] == format(sdk.span_id,'016x')
     assert 'secret-outlet-sentinel' not in output.getvalue()
@@ -130,15 +130,15 @@ def test_filtering_span_only_exact_fresh_detail_envelopes_and_safe_events():
     safe = details.project_details(retrieval_input={'query':'readable'})
     proxy.set_attributes(details.flatten_details(safe))
     proxy.set_attribute('nkb.details.retrieval_input.other','forbidden')
-    proxy.set_attribute('nkb.details.unknown.content','forbidden')
-    proxy.set_attributes({'nkb.details.document_input.content':json.dumps({'file_content':'forbidden-file'}),
-        'nkb.details.document_input.original_bytes':100, 'nkb.details.document_input.truncated':False})
+    proxy.set_attribute('nkb.content.unknown','forbidden')
+    proxy.set_attributes({'nkb.content.document_input':json.dumps({'file_content':'forbidden-file'}),
+        'nkb.content.document_input_original_bytes':100, 'nkb.content.document_input_truncated':False})
     obs.register_safe_event('done %s','execution_completed')
     proxy.add_event('execution_completed',dict(details.flatten_details(safe), arbitrary='forbidden'))
     proxy.record_exception(ValueError('forbidden-exception'))
     proxy.set_status(trace.Status(trace.StatusCode.ERROR,'forbidden-description'))
     proxy.end()
-    assert span.attributes['nkb.details.retrieval_input.content'] == safe['retrieval_input']['content']
+    assert span.attributes['nkb.content.retrieval_input'] == safe['retrieval_input']['content']
     assert 'forbidden' not in json.dumps(dict(span.attributes))
     assert span.events[0].name == 'execution_completed'
     assert 'arbitrary' not in span.events[0].attributes
@@ -166,8 +166,8 @@ def test_explicit_owner_terminal_event_and_unsampled_log():
                 details=details.project_details(retrieval_input='owner-input'),owner_context=owner)
         assert json.loads(output.getvalue())['span_id'] == format(owner.context.span_id,'016x')
         assert len(owner.events) == 1 and not other.events
-        assert owner.attributes['nkb.details.retrieval_input.content'] == 'owner-input'
-        assert owner.events[0].attributes['nkb.details.retrieval_input.content'] == 'owner-input'
+        assert owner.attributes['nkb.content.retrieval_input'] == 'owner-input'
+        assert owner.events[0].attributes['nkb.content.retrieval_input'] == 'owner-input'
         unsampled = trace.NonRecordingSpan(trace.SpanContext(123,456,False,trace.TraceFlags(0)))
         with trace.use_span(other,end_on_exit=False):
             obs.log_http_request_completed('POST','/retrieval/search',200,1,'completed',
@@ -182,32 +182,33 @@ def test_explicit_owner_terminal_event_and_unsampled_log():
         provider.shutdown()
 
 
-def test_real_sdk_limits_support_65536_content_without_cutting_metadata():
+@pytest.mark.parametrize("limit", [65536, 1024000])
+def test_real_sdk_limits_support_large_content_without_cutting_metadata(limit):
     from app.infrastructure.observability.setup import _detail_sdk_limits
-    span_limits, log_limits = _detail_sdk_limits(65536)
+    span_limits, log_limits = _detail_sdk_limits(limit)
     provider = TracerProvider(span_limits=span_limits)
     exporter = InMemoryLogRecordExporter()
     logs = LoggerProvider(log_record_limits=log_limits)
     logs.add_log_record_processor(SimpleLogRecordProcessor(exporter))
-    sanitizer.configure_details(obs.ensure_sanitizer().sanitize,65536)
+    sanitizer.configure_details(obs.ensure_sanitizer().sanitize,limit)
     obs.configure_execution_context(project=details.project_details,validate=details.validate_details,
-        flatten=details.flatten_details,details_snapshot=details.current_details,budget=details.budget_details,max_bytes=65536)
+        flatten=details.flatten_details,details_snapshot=details.current_details,budget=details.budget_details,max_bytes=limit)
     obs.register_safe_event('large done','execution_completed')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore',DeprecationWarning)
         bridge = obs.SafeLogBridge(LoggingHandler(logger_provider=logs))
     with provider.get_tracer('large').start_as_current_span('large') as span:
-        with details.detail_scope(retrieval_input='汉'*21845 + 'a'):
+        with details.detail_scope(retrieval_input='汉'*(limit // 3) + 'a'*(limit % 3)):
             raw = record('large done',())
             bridge.handle(raw)
     exported = exporter.get_finished_logs()[0].log_record
-    key = 'nkb.details.retrieval_input.content'
-    assert len(span.attributes[key].encode()) == 65536
+    key = 'nkb.content.retrieval_input'
+    assert len(span.attributes[key].encode()) == limit
     assert span.attributes[key] == span.events[0].attributes[key]
-    assert len(span.events[0].attributes[key].encode()) == 65536
+    assert len(span.events[0].attributes[key].encode()) == limit
     assert exported.attributes[key] == span.events[0].attributes[key]
-    assert exported.attributes['nkb.details.retrieval_input.original_bytes'] == 65536
-    assert exported.attributes['nkb.details.retrieval_input.truncated'] is False
+    assert exported.attributes['nkb.content.retrieval_input_original_bytes'] == limit
+    assert exported.attributes['nkb.content.retrieval_input_truncated'] is False
     provider.shutdown()
     logs.shutdown()
 
@@ -229,7 +230,7 @@ def test_forged_detail_extras_preserve_safe_information_without_policy_bypass():
     raw = record()
     raw.details = {'retrieval_input':{'content':json.dumps({'query':'keep query','file_content':'drop-file'}),
         'original_bytes':1,'truncated':False}}
-    raw.__dict__['nkb.details.log_fields.content'] = json.dumps({'query':'keep flat','tags':['drop-tag']})
+    raw.__dict__['nkb.content.log_fields'] = json.dumps({'query':'keep flat','tags':['drop-tag']})
     raw._prepared = object()
     prepared = obs.project_record(raw)
     text = json.dumps(prepared.details)
@@ -252,12 +253,12 @@ def test_filtered_owner_preserves_one_prepared_truncation_metadata():
             handler.handle(raw)
             obs.SafeLogBridge().handle(raw)
     payload = json.loads(output.getvalue())
-    prefix = 'nkb.details.retrieval_input.'
-    assert raw_span.events[0].attributes[prefix+'original_bytes'] == payload['details']['retrieval_input']['original_bytes'] == 4096
-    assert raw_span.events[0].attributes[prefix+'truncated'] is True
+    prefix = 'nkb.content.retrieval_input'
+    assert raw_span.events[0].attributes[prefix+'_original_bytes'] == payload['details']['retrieval_input']['original_bytes'] == 4096
+    assert raw_span.events[0].attributes[prefix+'_truncated'] is True
     owner.end()
-    assert raw_span.attributes[prefix+'original_bytes'] == 4096
-    assert raw_span.attributes[prefix+'content'] == raw_span.events[0].attributes[prefix+'content']
+    assert raw_span.attributes[prefix+'_original_bytes'] == 4096
+    assert raw_span.attributes[prefix] == raw_span.events[0].attributes[prefix]
     provider.shutdown()
 
 
@@ -272,7 +273,7 @@ def test_projection_callback_failure_keeps_other_readable_fields_and_diagnostic(
         prepared = obs.project_record(raw)
     assert prepared.message == 'readable answer'
     assert prepared.details['retrieval_input']['content'] == 'safe input'
-    assert prepared.facts['details_unavailable'] is True
+    assert prepared.facts['nkb.observation.error'] == 'details_unavailable'
 
 
 def test_bridge_recursion_isolated_and_raw_failure_never_reaches_stderr(capsys):
@@ -302,7 +303,7 @@ def test_secret_policy_changed_mid_projection_fails_closed_for_entire_record():
     raw.payload = {'query':'hello'}
     prepared = obs.project_record(raw)
     assert 'new-secret' not in json.dumps(dict(message=prepared.message,details=prepared.details))
-    assert prepared.facts['details_unavailable'] is True
+    assert prepared.facts['nkb.observation.error'] == 'details_unavailable'
 
 
 def test_log_identity_text_cannot_leak_catalog_secret():
@@ -365,7 +366,7 @@ def test_json_handler_callback_logging_and_failure_do_not_recurse(capsys):
         assert len(calls) == 1
         payloads = output.getvalue().splitlines()
         assert len(payloads) == 1
-        assert json.loads(payloads[0])['details_unavailable'] is True
+        assert json.loads(payloads[0])['nkb.observation.error'] == 'details_unavailable'
         assert 'secret-outlet-sentinel' not in output.getvalue() + capsys.readouterr().err
     finally:
         logger.removeHandler(handler)
@@ -374,6 +375,8 @@ def test_json_handler_callback_logging_and_failure_do_not_recurse(capsys):
 
 
 def test_raw_registered_span_event_has_same_total_budget_and_safe_partial_text():
+    obs.configure_execution_context(project=details.project_details,validate=details.validate_details,
+        flatten=details.flatten_details,details_snapshot=details.current_details,budget=details.budget_details,max_bytes=2048)
     from app.infrastructure.observability.instrumentors import _FilteringSpan
     provider = TracerProvider()
     span = provider.get_tracer('raw-event').start_span('owner')
@@ -384,7 +387,7 @@ def test_raw_registered_span_event_has_same_total_budget_and_safe_partial_text()
     attributes.update({'message':'M'*2048,'exception.type':'ValueError','exception.message':'E'*2048,
                        'exception.stacktrace':'S'*2048})
     owner.add_event('execution_completed',attributes)
-    assert 'nkb.details.error.content' in span.events[0].attributes
+    assert 'nkb.content.error' in span.events[0].attributes
     assert len(json.dumps(dict(span.events[0].attributes),ensure_ascii=False).encode()) <= 8192
     secret = 'UNIQUE' + 'x'*10000
     obs.ensure_sanitizer().configure_secret_catalog([secret])
@@ -435,7 +438,7 @@ def test_direct_span_detail_writes_share_actual_flat_budget(limit,bulk):
     provider = TracerProvider(span_limits=limits)
     span = provider.get_tracer('direct-budget').start_span('owner')
     owner = _FilteringSpan(span)
-    attrs = {'nkb.details.'+name+'.content':'x'*limit for name in details.FIELDS}
+    attrs = {'nkb.content.'+name:'x'*limit for name in details.FIELDS}
     if bulk == 'initial':
         span.end()
         owner = _FilteringTracer(provider.get_tracer('direct-budget')).start_span('owner',attributes=attrs)
@@ -446,10 +449,10 @@ def test_direct_span_detail_writes_share_actual_flat_budget(limit,bulk):
         for key,value in attrs.items():
             owner.set_attribute(key,value)
     owner.end()
-    flat = {key:value for key,value in span.attributes.items() if key.startswith('nkb.details.')}
+    flat = {key:value for key,value in span.attributes.items() if key.startswith('nkb.content.')}
     assert len(json.dumps(flat,ensure_ascii=False).encode()) <= limit*4
     if limit > 1:
-        assert flat and any(key.endswith('.truncated') and value for key,value in flat.items())
+        assert flat and any(key.endswith('_truncated') and value for key,value in flat.items())
     provider.shutdown()
 
 
@@ -474,7 +477,7 @@ def test_buffered_span_details_revalidate_after_catalog_changes_and_fact_update(
     provider = TracerProvider()
     span = provider.get_tracer('policy').start_span('owner')
     owner = _FilteringSpan(span)
-    owner.set_attribute('nkb.details.retrieval_input.content','new-catalog-secret')
+    owner.set_attribute('nkb.content.retrieval_input','new-catalog-secret')
     obs.ensure_sanitizer().configure_secret_catalog(['new-catalog-secret'])
     owner.set_attributes({'http.request.method':'POST'})
     owner.end()

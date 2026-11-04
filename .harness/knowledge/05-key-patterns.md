@@ -112,6 +112,10 @@ FE 展示文档标题、原文、来源、标签、chunk 文本和检索片段�
 
 观测日志与详情采用统一Prepared脱敏和预算：注册模板用于稳定分类，普通应用/库/异常日志保留安全可读内容；Span属性/Event/OTLP复用同次投影，本地ring仅保留事实。完整文件、完整向量与凭据禁采，详见07-observability.md。
 
+固定词汇与严格类型位于 `telemetry_contract.py`；`telemetry_semantics.py` 冻结唯一完成快照，在所属 Span current 时记录指标与一个完成 Event，再经受信 side table 回调记录 Log。普通日志即使匹配完成模板也不能补造完成事件。准备好的详情须经注入 completion_scope 批量写入，逐字段重投影会丢失截断元数据。通用执行属性入口排除全部 content 字段。
+
+HTTP 的 `telemetry_requests.py` owner 是请求级共享对象，线程池路由只回传受信处理结果；操作 ContextVar 仍只继承身份并恢复结果，不靠 ContextVar 替换将线程内结果反向带回 ASGI。HTTP 传输按实际结束单独分类，缺状态码不补 500，Span 创建失败的安全日志保留相同超时/拒绝分类。
+
 陷阱：观测包装不得改变业务返回值或异常传播（助手全部静默隔离）；dbapi 埋点只拦截 `.cursor()` 派生游标，SQLite 直连 `connection.execute` 对埋点不可见；不把 exporter succeeded 呈现为后端已持久化。
 
 ## 模式十一：管理页 OTel 生命周期

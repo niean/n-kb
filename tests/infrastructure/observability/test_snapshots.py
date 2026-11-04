@@ -1,6 +1,16 @@
 """Runtime snapshots exercise real SDK aggregations, never SDK objects."""
 import json
 from types import SimpleNamespace
+import pytest
+
+@pytest.fixture(autouse=True)
+def contract_projection():
+    from app.application.telemetry_contract import project_execution_attributes
+    from app.infrastructure.observability.snapshots import configure_execution_projector
+    configure_execution_projector(project_execution_attributes)
+    yield
+    configure_execution_projector()
+
 
 
 def test_real_sdk_histogram_counter_projection_and_copy():
@@ -10,9 +20,9 @@ def test_real_sdk_histogram_counter_projection_and_copy():
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     meter = provider.get_meter(__name__)
-    meter.create_histogram('duration', unit='s').record(2, {'outcome': 'success', 'query': 'SECRET'})
+    meter.create_histogram('duration', unit='s').record(2, {'nkb.retrieval.outcome': 'success', 'query': 'SECRET'})
     meter.create_counter('requests').add(3)
-    registry = {n: SimpleNamespace(kind=k, unit=u, allowed_dimensions=('outcome',))
+    registry = {n: SimpleNamespace(kind=k, unit=u, allowed_dimensions=('nkb.retrieval.outcome',))
                 for n,k,u in [('duration','histogram','s'), ('requests','counter','')]}
     summary = snapshots.MetricSnapshot(registry)
     summary.capture(reader.get_metrics_data())
@@ -21,7 +31,7 @@ def test_real_sdk_histogram_counter_projection_and_copy():
     histogram, counter = result['instruments']
     assert histogram['points'][0]['count'] == 1
     assert histogram['points'][0]['sum'] == 2
-    assert histogram['points'][0]['attributes'] == {'outcome': 'success'}
+    assert histogram['points'][0]['attributes'] == {'nkb.retrieval.outcome': 'success'}
     assert counter['points'][0]['value'] == 3
     assert histogram['points'][0]['end_time'].endswith('+00:00')
     assert 'SECRET' not in json.dumps(result, allow_nan=False)
@@ -56,16 +66,16 @@ def test_snapshots_fail_closed_on_values_and_enforce_limits():
     from opentelemetry.sdk.metrics.export import MetricsData, ResourceMetrics, ScopeMetrics, Metric, Sum, NumberDataPoint, AggregationTemporality
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.util.instrumentation import InstrumentationScope
-    points = [NumberDataPoint({'outcome':'SECRET', 'device':'/SECRET', 'otel.metrics.overflow': True}, 1, 2, float('nan')) for _ in range(105)]
+    points = [NumberDataPoint({'nkb.retrieval.outcome':'SECRET', 'device':'/SECRET', 'otel.metrics.overflow': True}, 1, 2, float('nan')) for _ in range(105)]
     metric = Metric('requests', '', '1', Sum(points, AggregationTemporality.CUMULATIVE, True))
     data = MetricsData([ResourceMetrics(Resource({}), [ScopeMetrics(InstrumentationScope('test'), [metric], '')], '')])
-    snapshot = MetricSnapshot({'requests':SimpleNamespace(kind='counter',unit='1',allowed_dimensions=('outcome',))})
+    snapshot = MetricSnapshot({'requests':SimpleNamespace(kind='counter',unit='1',allowed_dimensions=('nkb.retrieval.outcome',))})
     snapshot.capture(data)
     result = snapshot.latest()
     assert result['truncated'] is True
     assert len(result['instruments'][0]['points']) == 100
     assert result['instruments'][0]['points'][0]['value'] is None
-    assert result['instruments'][0]['points'][0]['attributes'] == {'otel.metrics.overflow':True}
+    assert result['instruments'][0]['points'][0]['attributes'] == {'nkb.metric.overflow':True}
     buffer = SafeLogBuffer()
     buffer.append({'attributes':{'query':'SECRET','exception.message':'SECRET'}})
     assert 'SECRET' not in json.dumps(buffer.latest(), allow_nan=False)
@@ -115,13 +125,13 @@ def test_real_span_ring_keeps_facts_even_when_projector_returns_content():
     provider = TracerProvider()
     provider.add_span_processor(ring)
     with provider.get_tracer('ring').start_as_current_span('safe-operation') as span:
-        span.set_attribute('nkb.details.retrieval_input.content','body-sentinel')
-        span.set_attribute('nkb.details.retrieval_input.original_bytes',13)
+        span.set_attribute('nkb.content.retrieval_input','body-sentinel')
+        span.set_attribute('nkb.content.retrieval_input_original_bytes',13)
         span.set_attribute('message','message-sentinel')
         span.set_attribute('exception.stacktrace','stack-sentinel')
         span.set_attribute('http.request.method','POST')
     snapshot = ring.snapshot_spans()
     assert snapshot[0]['attributes']['http.request.method'] == 'POST'
     assert 'sentinel' not in json.dumps(snapshot)
-    assert not any(key.startswith('nkb.details.') for key in snapshot[0]['attributes'])
+    assert not any(key.startswith('nkb.content.') for key in snapshot[0]['attributes'])
     provider.shutdown()

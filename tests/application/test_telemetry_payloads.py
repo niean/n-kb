@@ -53,8 +53,8 @@ def test_retrieval_details_and_terminal_ownership(outlets):
     service = RetrievalService(SimpleNamespace(embed_query=lambda query:[.1,.2]),vector)
     assert len(service.search('readable query payload-secret',RetrievalFilter(tags={'topic':'private-tag'},min_score=.2),12)) == 12
     span = next(s for s in exporter.get_finished_spans() if s.name == ts.RETRIEVAL_SPAN_NAME)
-    data = json.loads(span.attributes['nkb.details.retrieval_input.content'])
-    result_data = json.loads(span.attributes['nkb.details.retrieval_output.content'])
+    data = json.loads(span.attributes['nkb.content.retrieval_input'])
+    result_data = json.loads(span.attributes['nkb.content.retrieval_output'])
     assert 'readable query' in data['query'] and data['top_k'] == 12 and data['min_score'] == .2
     assert result_data['result_count'] == 12 and result_data['returned_count'] <= 10 and result_data['results_truncated'] is True
     assert len(span.events) == 1 and span.events[0].name == 'nkb.retrieval.completed'
@@ -68,8 +68,8 @@ def test_embedding_details_and_terminal_without_float_vectors(outlets):
     provider = OllamaEmbeddingProvider('http://model','model',client=client,embedding_observer=ts.embedding_observer)
     assert provider.embed_query('readable embedding payload-secret') == [.123456789,.987654321]
     span = exporter.get_finished_spans()[-1]
-    assert json.loads(span.attributes['nkb.details.embedding_input.content'])['input_count'] == 1
-    result = json.loads(span.attributes['nkb.details.embedding_result.content'])
+    assert json.loads(span.attributes['nkb.content.embedding_input'])['input_count'] == 1
+    result = json.loads(span.attributes['nkb.content.embedding_result'])
     assert result['output_count'] == 1 and result['dimensions'] == [2] and result['input_tokens'] == 7
     assert len(span.events) == 1
     assert 'payload-secret' not in output.getvalue() and '0.123456789' not in output.getvalue()
@@ -93,11 +93,11 @@ def test_upload_and_index_stage_metadata_without_document_body(outlets,tmp_path)
     job = service.index_document(document.id)
     assert job.status.value == 'succeeded'
     spans = exporter.get_finished_spans()
-    expected = {'nkb.document.upload','nkb.index.run','nkb.index.parse','nkb.index.split','nkb.index.embed','nkb.index.write'}
+    expected = {'document.upload','index.run','index.parse','index.split','index.embed','index.write'}
     assert {s.name for s in spans} == expected
     for span in spans:
         assert len(span.events) == 1
-        assert any(key.startswith('nkb.details.') for key in span.attributes)
+        assert any(key.startswith('nkb.content.') for key in span.attributes)
     assert 'file-body-never-export' not in output.getvalue() and 'private-tag' not in output.getvalue()
 
 
@@ -109,9 +109,10 @@ def test_collector_nkb_exact_details_and_no_unknown_metadata():
         pytest.skip('adjacent shared Collector not available')
     config = yaml.safe_load(path.read_text())
     statements = config['processors']['transform/loki_json']['log_statements'][0]['statements']
-    nkb = [line for line in statements if 'nkb.details.' in line]
+    nkb = [line for line in statements if 'nkb.content.' in line]
     for name in td.FIELDS:
         for key in ('content','original_bytes','truncated','incomplete','observed_bytes'):
-            assert any('attributes["nkb.details.'+name+'.'+key+'"]' in line for line in nkb)
+            suffix = '' if key == 'content' else '_' + key
+            assert any('attributes["nkb.content.'+name+suffix+'"]' in line for line in nkb)
     assert all('resource.attributes["service.name"] == "n-kb"' in line for line in nkb)
     assert statements[-1] == 'set(attributes, {}) where resource.attributes["service.name"] == "n-kb"'

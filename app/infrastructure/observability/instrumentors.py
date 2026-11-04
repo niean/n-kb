@@ -44,7 +44,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import httpx
 from urllib.parse import urlparse
@@ -78,7 +78,7 @@ ALLOWED_AUTO_ATTRIBUTES = frozenset((
     # 出站 CLIENT：host/port/模板/调用方/网络协议
     "net.peer.name", "net.peer.port",
     "server.address", "server.port",
-    "url.template", "nkb.http.caller", "duration_ms",
+    "url.template", "nkb.http.caller", "nkb.http.duration_ms",
     "network.protocol.name", "network.protocol.version",
     "network.peer.address", "network.peer.port",
     # SQLite：系统/库名/操作/表名（statement 一律拦截并投影表名）
@@ -107,6 +107,51 @@ _GLOBAL_STATE = {"httpx": False, "sqlite3": False}
 
 # CLIENT span 抑制（T7 注入点：独立探测与 MCP status 依赖调用）。
 _SUPPRESS_CLIENT: ContextVar = ContextVar("nkb_otel_suppress_client", default=False)
+_request_scope_factory = None
+_request_snapshot = None
+
+
+def configure_request_context(*, scope_factory=None, snapshot=None):
+    """Composition supplies trusted per-request ownership, including threads."""
+    global _request_scope_factory, _request_snapshot
+    _request_scope_factory, _request_snapshot = scope_factory, snapshot
+
+
+def _request_facts():
+    try:
+        return dict(_request_snapshot()) if _request_snapshot is not None else {}
+    except Exception:
+        return {}
+
+
+def _is_timeout(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+            return True
+        exc = exc.__cause__
+    return False
+
+
+@contextmanager
+def _safe_request_scope(channel):
+    manager = None
+    try:
+        if _request_scope_factory is not None:
+            candidate = _request_scope_factory(channel)
+            candidate.__enter__()
+            manager = candidate
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if manager is not None:
+            try:
+                manager.__exit__(None, None, None)
+            except Exception:
+                pass
 
 
 def _extract_table_name(statement):
@@ -126,6 +171,18 @@ def _sanitize_attr_value(value):
     return value
 
 
+def _valid_auto_attribute(key, value):
+    if key in ("http.response.status_code", "http.status_code"):
+        return type(value) is int and 100 <= value <= 599
+    if key in ("http.request.method", "http.method"):
+        return type(value) is str and value in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "_OTHER")
+    if key in ("net.host.port", "net.peer.port", "server.port", "network.peer.port"):
+        return type(value) is int and 0 < value <= 65535
+    if key in ("nkb.http.duration_ms", "nkb.http.caller"):
+        return key in obs_logging.project_log_attributes({key: value})
+    return type(value) is str
+
+
 def _filter_attributes(attributes):
     """采集前投影属性映射：白名单放行、statement 只留表名、其余丢弃。"""
     if attributes is None:
@@ -137,6 +194,7 @@ def _filter_attributes(attributes):
     filtered = {}
     if isinstance(attributes, Mapping):
         filtered.update(obs_logging.project_flat_details(attributes))
+        filtered.update(obs_logging.project_log_attributes(dict(attributes)))
     for key, value in items:
         if type(key) is not str:
             continue
@@ -145,7 +203,7 @@ def _filter_attributes(attributes):
             if table:
                 filtered["db.collection.name"] = table
             continue
-        if key in ALLOWED_AUTO_ATTRIBUTES:
+        if key in ALLOWED_AUTO_ATTRIBUTES and _valid_auto_attribute(key, value):
             filtered[key] = _sanitize_attr_value(value)
     return filtered
 
@@ -176,8 +234,11 @@ class _FilteringSpan(trace_api.Span):
         self._http_client = http_client
         self._lifecycle = None
         self._http_logged = False
+        self._ended = False
         self._http_cancelled = False
+        self._http_timeout = False
         self._http_error = None
+        self._response_started = not http_server
         self._completion_event_added = False
         self._http_capture = None
         self._http_details = {}
@@ -213,7 +274,7 @@ class _FilteringSpan(trace_api.Span):
             merged = dict(self._detail_attributes)
             merged.update(projected)
             self._detail_attributes = obs_logging.fit_safe_flat_details(merged)
-        elif any(type(key) is str and key.startswith("nkb.details.") for key in attributes):
+        elif any(type(key) is str and key.startswith("nkb.content.") for key in attributes):
             self._details_unavailable = True
         self._detail_policy_token = obs_logging.detail_policy_token()
 
@@ -225,20 +286,33 @@ class _FilteringSpan(trace_api.Span):
                 if self._detail_attributes:
                     self._span.set_attributes(self._detail_attributes)
                 if self._details_unavailable:
-                    self._span.set_attribute("details_unavailable", True)
+                    self._span.set_attribute("nkb.observation.error", "details_unavailable")
         finally:
             self._detail_attributes = {}
 
     def _set_projected(self, key, value):
+        if key in ("db.system", "db.system.name"):
+            # SQLite instrumentors set DB attributes after start_span().
+            # CLIENT kind alone does not establish an HTTP operation.
+            self._http_client = False
+            self._http_attributes = None
+            self._http_started = None
         if key in ("db.statement", "db.query.text"):
             table = _extract_table_name(value) if type(value) is str else None
             if table:
                 self._set_projected("db.collection.name", table)
             return
-        if type(key) is str and key.startswith("nkb.details."):
+        if type(key) is str and key.startswith("nkb.content."):
             self._update_details({key:value})
             return
+        if key in ("http.response.status_code", "http.status_code") and self._http_server and not self._response_started:
+            return
         if key not in ALLOWED_AUTO_ATTRIBUTES:
+            safe = obs_logging.project_log_attributes({key: value})
+            if key not in safe:
+                return
+            value = safe[key]
+        elif not _valid_auto_attribute(key, value):
             return
         value = _sanitize_attr_value(value)
         try:
@@ -261,7 +335,7 @@ class _FilteringSpan(trace_api.Span):
         self._update_details(detail_source)
         items = attributes.items() if isinstance(attributes, Mapping) else dict(attributes or {}).items()
         for key, value in items:
-            if type(key) is str and key.startswith("nkb.details."):
+            if type(key) is str and key.startswith("nkb.content."):
                 continue
             self._set_projected(key, value)
         return self
@@ -318,6 +392,8 @@ class _FilteringSpan(trace_api.Span):
             return False
 
     def end(self, end_time=None):
+        if self._ended:
+            return
         if self._lifecycle is not None and not self._lifecycle.ready:
             # CLIENT 传输终态未到：推迟结束（流读完/close/异常时补）。
             self._lifecycle.end_requested = True
@@ -328,6 +404,7 @@ class _FilteringSpan(trace_api.Span):
         except Exception:
             pass
         try:
+            self._ended = True
             self._span.end(end_time)
         except Exception:
             pass
@@ -338,8 +415,12 @@ class _FilteringSpan(trace_api.Span):
         self._http_logged = True
         try:
             if self._http_capture is not None:
-                self._http_details = self._http_capture.project()
-                self._http_capture = None
+                try:
+                    self._http_details = self._http_capture.project()
+                except Exception:
+                    self._details_unavailable = True
+                finally:
+                    self._http_capture = None
             if self._http_server:
                 self._complete_http_server()
             elif self._http_client:
@@ -350,52 +431,73 @@ class _FilteringSpan(trace_api.Span):
     def _outcome(self, status):
         if self._http_cancelled:
             return "cancelled"
+        if self._http_timeout:
+            return "timed_out"
         if self._lifecycle is not None and self._lifecycle.error is not None:
-            return "error"
+            return "failure"
         if self._http_error is not None:
-            return "error"
+            return "failure"
         if type(status) is int and status >= 400:
-            return "error"
+            return "failure"
         # 传输已终态但未完整消费（如 close-without-read）→ incomplete
         if (
             self._lifecycle is not None
             and self._lifecycle.ready
             and not self._lifecycle.complete
         ):
-            return "incomplete"
-        return None
+            return "unknown"
+        return "success" if type(status) is int and 200 <= status < 400 else "unknown"
 
     def _complete_http_server(self):
         facts = self._http_attributes
         status = facts.get("http.response.status_code")
         outcome = self._outcome(status)
-        if outcome is None:
-            outcome = "completed" if status is not None else "incomplete"
         method = facts.get("http.request.method")
         route = facts.get("http.route")
-        duration = facts.get("duration_ms")
+        duration = facts.get("nkb.http.duration_ms")
+        request = _request_facts()
+        if request.get("nkb.request.outcome") == "denied" and type(status) is int and 400 <= status < 500:
+            outcome = "denied"
         with trace_api.use_span(
             self, end_on_exit=False, record_exception=False,
             set_status_on_exception=False,
         ):
-            obs_logging.log_http_request_completed(
+            published = self._log_http(obs_logging.log_http_request_completed,
                 method, route, status, duration, outcome,
                 details=self._http_details, owner_context=self,
+                execution_facts=request,
             )
-        self._fallback_http_event(HTTP_COMPLETED_EVENT, facts)
+        self._fallback_http_event(HTTP_COMPLETED_EVENT, published or self._completion_facts(outcome, duration, request))
+
+    def _completion_facts(self, outcome, duration, extra=None):
+        return {**(self._http_attributes or {}), **(extra or {}),
+                "nkb.http.direction": "server" if self._http_server else "client",
+                "nkb.http.outcome": outcome, "nkb.http.summary": "HTTP completed",
+                **({"nkb.http.duration_ms": duration} if duration is not None else {})}
+
+    @staticmethod
+    def _log_http(callback, *args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except Exception:
+            return {}
 
     def _fallback_http_event(self, event, facts):
         if not self._completion_event_added:
-            flat = obs_logging._call('flatten', self._http_details)
-            self.set_attributes(flat)
-            self.add_event(event, dict(facts, **flat))
+            attributes = dict(facts)
+            if not any(key.startswith("nkb.content.") for key in attributes):
+                attributes.update(obs_logging._call('flatten', self._http_details))
+            token = obs_logging._prepared_outlet.set(attributes)
+            try:
+                self.set_attributes(attributes)
+                self.add_event(event, attributes)
+            finally:
+                obs_logging._prepared_outlet.reset(token)
 
     def _complete_http_client(self):
         facts = self._http_attributes
         status = facts.get("http.response.status_code")
         outcome = self._outcome(status)
-        if outcome is None:
-            outcome = "completed" if status is not None else "incomplete"
         duration_ms = None
         if self._http_started is not None:
             try:
@@ -403,14 +505,14 @@ class _FilteringSpan(trace_api.Span):
                     (time.perf_counter() - self._http_started) * 1000, 3
                 )
                 # 事件属性与日志出口都带耗时。
-                self._set_projected("duration_ms", duration_ms)
+                self._set_projected("nkb.http.duration_ms", duration_ms)
             except Exception:
                 duration_ms = None
         with trace_api.use_span(
             self, end_on_exit=False, record_exception=False,
             set_status_on_exception=False,
         ):
-            obs_logging.log_http_client_completed(
+            published = self._log_http(obs_logging.log_http_client_completed,
                 facts.get("http.request.method"),
                 facts.get("server.address"),
                 facts.get("server.port"),
@@ -421,7 +523,7 @@ class _FilteringSpan(trace_api.Span):
                 outcome=outcome,
                 details=self._http_details, owner_context=self,
             )
-        self._fallback_http_event(HTTP_CLIENT_COMPLETED_EVENT, facts)
+        self._fallback_http_event(HTTP_CLIENT_COMPLETED_EVENT, published or self._completion_facts(outcome, duration_ms))
 
 
 class _ClientLifecycle:
@@ -448,8 +550,11 @@ class _ClientLifecycle:
         if capture is not None:
             capture.response.complete = complete
         if error is not None:
-            self.span._http_cancelled = isinstance(error, asyncio.CancelledError)
+            self.span._http_cancelled = isinstance(error, (asyncio.CancelledError, GeneratorExit))
+            self.span._http_timeout = _is_timeout(error)
             self.span._http_error = None if self.span._http_cancelled else type(error).__name__
+            if not self.span._http_cancelled:
+                self.span.set_status(trace_api.Status(StatusCode.ERROR))
         if self.end_requested:
             try:
                 self.span.end()
@@ -613,7 +718,7 @@ def _wrap_httpx_transports():
 
 
 def _http_caller():
-    """定位调用方 app.* 帧；只读模块名/函数名，绝不读参数值。"""
+    """Map reviewed callsites to fixed names without reading arguments."""
     try:
         frame = sys._getframe(1)
     except Exception:
@@ -625,9 +730,15 @@ def _http_caller():
             and name.startswith("app.")
             and not name.startswith("app.infrastructure.observability")
         ):
-            return f"{name}:{frame.f_code.co_name}"
+            if name == "app.infrastructure.embedding.ollama_provider":
+                return "ollama.embed" if frame.f_code.co_name != "health" else "health.check"
+            if name == "app.infrastructure.vector.qdrant_index":
+                return "health.check" if frame.f_code.co_name == "health" else "qdrant.request"
+            if name == "app.application.health_service":
+                return "health.check"
+            return "http.request"
         frame = frame.f_back
-    return None
+    return "unknown"
 
 
 def _request_info_fields(request):
@@ -816,7 +927,7 @@ def _http_route_template(path):
     for segment in path.split("/"):
         if not segment:
             continue
-        if segment in _KEEP_SEGMENTS:
+        if segment in _KEEP_SEGMENTS or segment in ("index-jobs", "{document_id}", "{job_id}", "{id}", "{redacted}"):
             parts.append(segment)
         elif _CREDENTIAL_SEGMENT.match(segment) or _SENSITIVE_SEGMENT.search(segment):
             parts.append("{redacted}")
@@ -863,16 +974,17 @@ def _fastapi_excluded_urls(templates, mcp_path=None):
 class _FilteringTracer:
     """API Tracer 代理：SERVER 白名单门控 + CLIENT 有效父级门控。"""
 
-    def __init__(self, tracer, allowlist=None):
+    def __init__(self, tracer, allowlist=None, http_clients=True):
         self._tracer = tracer
         self._allowlist = allowlist
+        self._http_clients = http_clients
 
     def start_span(self, name, context=None, kind=SpanKind.INTERNAL,
                    attributes=None, links=None, start_time=None,
                    record_exception=False, set_status_on_exception=False):
         filtered = _filter_attributes(attributes)
-        details = {key:value for key,value in filtered.items() if key.startswith("nkb.details.")}
-        filtered = {key:value for key,value in filtered.items() if not key.startswith("nkb.details.")}
+        details = {key:value for key,value in filtered.items() if key.startswith("nkb.content.")}
+        filtered = {key:value for key,value in filtered.items() if not key.startswith("nkb.content.")}
         if kind == SpanKind.SERVER and self._allowlist is not None:
             method, route = _server_identity(name, filtered)
             if not self._allowlist.allows(method, route):
@@ -885,11 +997,14 @@ class _FilteringTracer:
             if not getattr(parent, "is_valid", False):
                 # 无有效父操作：不建 CLIENT span（不用 is_recording 判断）。
                 return _FilteringSpan(trace_api.INVALID_SPAN)
-        span = self._tracer.start_span(
-            name, context=context, kind=kind, attributes=filtered,
-            links=links, start_time=start_time, record_exception=False,
-            set_status_on_exception=False,
-        )
+        try:
+            span = self._tracer.start_span(
+                name, context=context, kind=kind, attributes=filtered,
+                links=links, start_time=start_time, record_exception=False,
+                set_status_on_exception=False,
+            )
+        except Exception:
+            return _FilteringSpan(trace_api.INVALID_SPAN)
         if kind == SpanKind.SERVER:
             facts = dict(filtered)
             if type(name) is str and " " in name:
@@ -897,7 +1012,7 @@ class _FilteringTracer:
                 facts.setdefault("http.request.method", method)
                 facts.setdefault("http.route", route)
             return _FilteringSpan(span, http_attributes=facts, http_server=True, detail_attributes=details)
-        if kind == SpanKind.CLIENT:
+        if kind == SpanKind.CLIENT and self._http_clients and not any(key in filtered for key in ("db.system", "db.system.name")):
             return _FilteringSpan(span, http_attributes=dict(filtered), http_client=True, detail_attributes=details)
         return _FilteringSpan(span, detail_attributes=details)
 
@@ -925,10 +1040,11 @@ class _FilteringTracer:
                 isinstance(span, _FilteringSpan)
                 and isinstance(span._http_attributes, dict)
             ):
-                if isinstance(exc, asyncio.CancelledError):
+                if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
                     span._http_cancelled = True
                 else:
                     span._http_error = type(exc).__name__
+                    span._http_timeout = _is_timeout(exc)
             raise
         finally:
             if end_on_exit:
@@ -947,6 +1063,7 @@ class _FilteringTracerProvider:
         return _FilteringTracer(
             self._provider.get_tracer(instrumenting_module_name, *args, **kwargs),
             self._allowlist,
+            http_clients=instrumenting_module_name not in ("opentelemetry.instrumentation.sqlite3", "opentelemetry.instrumentation.dbapi"),
         )
 
     def __getattr__(self, item):
@@ -1041,24 +1158,21 @@ class _ObserveSend:
             if self._traced and self._span._http_capture is not None:
                 headers = {k.decode('latin1'):v.decode('latin1') for k,v in message.get('headers', [])}
                 self._span._http_capture.response_headers(headers)
-            status = message.get("status")
-            if type(status) is int:
-                self.status = status
-                if self._traced:
-                    # otel_send 转发后可能立即 end；状态码先行入 facts。
-                    self._span._set_projected("http.response.status_code", status)
-                    # SERVER 5xx 为 ERROR；4xx 保持默认 UNSET（客户端输入
-                    # 错误不映射为服务端故障）。description 一律不带。
-                    if status >= 500:
-                        self._span.set_status(trace_api.Status(StatusCode.ERROR))
         elif mtype == 'http.response.body' and self._traced:
             if self._span._http_capture is not None:
                 self._span._http_capture.response.observe(message.get('body', b''))
         await self._send(message)
+        if mtype == "http.response.start" and type(message.get("status")) is int:
+            self.status = message["status"]
+            if self._traced:
+                self._span._response_started = True
+                self._span._set_projected("http.response.status_code", self.status)
+                if self.status >= 500:
+                    self._span.set_status(trace_api.Status(StatusCode.ERROR))
         if mtype == 'http.response.body' and not message.get('more_body', False):
             self.final = True
             if self._traced:
-                self._span._set_projected('duration_ms', round((time.perf_counter()-self._started)*1000, 3))
+                self._span._set_projected('nkb.http.duration_ms', round((time.perf_counter()-self._started)*1000, 3))
                 if self._span._lifecycle is not None:
                     self._span._lifecycle.finish(complete=True)
 
@@ -1087,6 +1201,15 @@ class _HttpAccessFactsMiddleware:
         return False
 
     async def __call__(self, scope, receive, send):
+        manager = nullcontext()
+        if scope.get("type") == "http" and not self._is_noise(scope.get("path") or "") and _request_scope_factory is not None:
+            path = scope.get("path") or ""
+            channel = "mcp_http" if self._mcp_path and (path == self._mcp_path or path.startswith(self._mcp_path + "/")) else "api"
+            manager = _safe_request_scope(channel)
+        with manager:
+            await self._observe(scope, receive, send)
+
+    async def _observe(self, scope, receive, send):
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
@@ -1101,6 +1224,7 @@ class _HttpAccessFactsMiddleware:
         )
         cancelled = False
         errored = False
+        transfer_error = None
         if traced:
             span._lifecycle = _ClientLifecycle(span)
             if obs_logging.details_capture_enabled():
@@ -1121,15 +1245,17 @@ class _HttpAccessFactsMiddleware:
         send_obs = _ObserveSend(send, span, traced, started)
         try:
             await self.app(scope, observed_receive, send_obs)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             cancelled = True
             if traced:
                 span._http_cancelled = True
             raise
         except BaseException as exc:
             errored = True
+            transfer_error = exc
             if traced:
                 span._http_error = type(exc).__name__
+                span._http_timeout = _is_timeout(exc)
                 span.set_status(trace_api.Status(StatusCode.ERROR))
             raise
         finally:
@@ -1138,27 +1264,27 @@ class _HttpAccessFactsMiddleware:
                     if not send_obs.final:
                         # otel_send 未触发 end（异常/取消/无响应）：
                         # SERVER 仍 current，补全事实并结束。
-                        if send_obs.status is None and errored and not cancelled:
-                            span._set_projected("http.response.status_code", 500)
-                            # 无响应的异常路径等价 5xx：SERVER 标记 ERROR。
-                            span.set_status(trace_api.Status(StatusCode.ERROR))
                         span._set_projected(
-                            "duration_ms",
+                            "nkb.http.duration_ms",
                             round((time.perf_counter() - started) * 1000, 3),
                         )
                         span._lifecycle.finish()
                         if not span._http_logged:
                             span.end()
-                elif method in _WRITE_METHODS and not self._is_noise(path):
+                elif (method in _WRITE_METHODS or _request_scope_factory is not None) and not self._is_noise(path):
                     status = send_obs.status
                     duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                    request = _request_facts()
                     outcome = (
                         "cancelled" if cancelled
-                        else ("completed" if status is not None else "incomplete")
+                        else "timed_out" if _is_timeout(transfer_error)
+                        else "denied" if request.get("nkb.request.outcome") == "denied" and type(status) is int and 400 <= status < 500
+                        else ("failure" if errored or (status is not None and status >= 400) else "success" if status is not None and 200 <= status < 400 and send_obs.final else "unknown")
                     )
                     obs_logging.log_http_request_completed(
                         method, _http_route_template(path), status,
                         duration_ms, outcome,
+                        execution_facts=request,
                     )
             except Exception:
                 pass

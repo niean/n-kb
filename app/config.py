@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = ""
     otel_traces_sample_ratio: float = 1.0
-    otel_content_max_bytes: int = 2048
+    otel_content_max_bytes: int = 1024000
     otel_grafana_base_url: str = ""
     otel_grafana_traces_base_url: str = ""
     otel_grafana_metrics_base_url: str = ""
@@ -142,8 +142,8 @@ class Settings(BaseSettings):
     @field_validator("otel_content_max_bytes")
     @classmethod
     def validate_content_max_bytes(cls, value: int) -> int:
-        if not 1 <= value <= 65536:
-            raise ValueError("otel_content_max_bytes must be between 1 and 65536")
+        if not 1 <= value <= 1024000:
+            raise ValueError("otel_content_max_bytes must be between 1 and 1024000")
         return value
 
     @field_validator("profiling_interval_seconds")

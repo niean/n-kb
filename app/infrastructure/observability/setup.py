@@ -276,6 +276,7 @@ class _RingBufferSpanProcessor:
     def __init__(self, semantics_keys: Optional[Mapping[str, str]] = None):
         keys = dict(semantics_keys or {})
         self._outcome_key = keys.get("outcome")
+        self._outcome_resolver = keys.get("outcome_resolver")
         self._error_type_key = keys.get("error_type")
         self._attribute_projector = keys.get("attribute_projector")
         self._closed = False
@@ -318,7 +319,8 @@ class _RingBufferSpanProcessor:
                     if status_code is not None
                     else ""
                 ),
-                "outcome": self._bounded_attr(attributes, self._outcome_key),
+                "outcome": (self._outcome_resolver(attributes, getattr(span, "name", ""))
+                            if self._outcome_resolver else self._bounded_attr(attributes, self._outcome_key)),
                 "error_type": self._bounded_attr(attributes, self._error_type_key),
                 "duration_ms": self._duration_ms(span),
             }
@@ -336,9 +338,15 @@ class _RingBufferSpanProcessor:
         if not key:
             return None
         value = attributes.get(key)
-        if isinstance(value, str) and value:
-            return value[:SNAPSHOT_FIELD_CHAR_CAP]
-        return None
+        if key == "error.type":
+            allowed = {"unsupported_file_type", "file_too_large", "embedding_failed",
+                       "vector_index_failed", "sqlite_failed", "timeout", "other"}
+        elif key.endswith(".outcome"):
+            allowed = {"success", "failure", "denied", "cancelled", "timed_out",
+                       "skipped", "deferred", "unknown"}
+        else:
+            return None
+        return value if type(value) is str and value in allowed else None
 
     @staticmethod
     def _duration_ms(span: Any) -> Optional[float]:

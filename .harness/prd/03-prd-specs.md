@@ -64,6 +64,10 @@
 - FR
   - 观测：左导菜单，健康页改到左导`观测-组件`页，然后干掉健康做到一级菜单。要求遵循项目FE规范
 
+[20261104]
+- FR
+  - 观测：观测语义规范化，NKB O11y Semantic Contract。参照N-Agent，定义N-KB的观测语义，完成代码修改；N-Agent观测语义参见：/Users/niean/code/github.com/niean/n-agent/.harness/knowledge/07-observability.md 对应章节
+
 ---
 
 [待办]

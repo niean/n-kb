@@ -6,12 +6,17 @@ import uuid
 
 from app.application import telemetry_semantics, telemetry_details
 from app.application.telemetry_payloads import safe_source
-from app.domain.document import Document, DocumentContent, DocumentSource, DocumentStatus
+from app.domain.document import (
+    Document,
+    DocumentContent,
+    DocumentSource,
+    DocumentStatus,
+)
 from app.domain.ports import ObjectStore, VectorIndex
 from app.domain.repositories import ChunkRepository, DocumentRepository
 from app.domain.tag import Tag, parse_tags
 
-UPLOAD_SPAN_NAME = "nkb.document.upload"
+UPLOAD_SPAN_NAME = "document.upload"
 
 
 @dataclass(frozen=True)
@@ -46,21 +51,43 @@ class DocumentService:
     def upload_document(self, command: UploadDocumentCommand) -> Document:
         # 与 retrieval/index 共享同一 nkb.* 操作 span 生命周期（统一 tracer
         # 与 operation_context 发布），业务合同不变。
-        with telemetry_semantics.operation_span(UPLOAD_SPAN_NAME):
-            telemetry_details.update_current_details(document_input={"filename":Path(command.filename).name,
-                "size_bytes":len(command.content),"file_type":Path(command.filename).suffix.lower(),
-                "source":safe_source({"kind":"upload","uri":command.source or command.filename}),"tags":command.tags})
+        with telemetry_semantics.operation_span(UPLOAD_SPAN_NAME) as span:
+            telemetry_details.update_current_details(
+                document_input={
+                    "filename": Path(command.filename).name,
+                    "size_bytes": len(command.content),
+                    "file_type": Path(command.filename).suffix.lower(),
+                    "source": safe_source(
+                        {"kind": "upload", "uri": command.source or command.filename}
+                    ),
+                    "tags": command.tags,
+                }
+            )
             document = self._upload_document(command)
-            telemetry_details.update_current_details(document_input={"filename":Path(command.filename).name,
-                "size_bytes":len(command.content),"file_type":Path(command.filename).suffix.lower(),
-                "source":safe_source({"kind":"upload","uri":command.source or command.filename}),"tags":command.tags,
-                "document_id":document.id,"status":document.status.value})
+            telemetry_semantics.set_span_attribute(span, "nkb.document.id", document.id)
+            telemetry_details.update_current_details(
+                document_input={
+                    "filename": Path(command.filename).name,
+                    "size_bytes": len(command.content),
+                    "file_type": Path(command.filename).suffix.lower(),
+                    "source": safe_source(
+                        {"kind": "upload", "uri": command.source or command.filename}
+                    ),
+                    "tags": command.tags,
+                    "document_id": document.id,
+                    "status": document.status.value,
+                }
+            )
             return document
 
     def _upload_document(self, command: UploadDocumentCommand) -> Document:
-        self._validate_upload(command.filename, command.content)
-        text = self._decode_content(command.content)
-        tags = parse_tags(command.tags)
+        try:
+            self._validate_upload(command.filename, command.content)
+            text = self._decode_content(command.content)
+            tags = parse_tags(command.tags)
+        except ValueError:
+            telemetry_semantics.set_operation_result(telemetry_semantics.OUTCOME_DENIED)
+            raise
         content_hash = hashlib.sha256(command.content).hexdigest()
         existing_document = self._document_repository.find_by_content_hash(content_hash)
         if existing_document is not None:
@@ -68,7 +95,9 @@ class DocumentService:
 
         document_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc)
-        stored_object = self._object_store.save(document_id, command.filename, command.content)
+        stored_object = self._object_store.save(
+            document_id, command.filename, command.content
+        )
 
         source = DocumentSource(
             kind="upload",

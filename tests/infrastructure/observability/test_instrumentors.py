@@ -51,7 +51,7 @@ from app.infrastructure.observability import instrumentors as ins
 from app.infrastructure.observability import logging as obs_logging
 
 # 自动埋点属性白名单（模块公开合同）。
-ALLOWED_ATTRS = ins.ALLOWED_AUTO_ATTRIBUTES
+ALLOWED_ATTRS = ins.ALLOWED_AUTO_ATTRIBUTES | {"nkb.http.outcome", "nkb.http.summary", "nkb.http.direction", "nkb.request.operation", "nkb.request.channel"}
 
 # 各出口秘密哨兵（SQL / URL / exc_info）。
 SECRET_SQL = "SECRET-SQL-sentinel-T5"
@@ -217,7 +217,12 @@ def instrumented():
 
 
 @pytest.fixture(autouse=True)
-def _clear_spans(instrumented):
+def _clear_spans(instrumented, monkeypatch):
+    from app.application import telemetry_contract, telemetry_requests
+    from app.infrastructure.observability import snapshots
+    monkeypatch.setattr(snapshots, "_execution_projector", telemetry_contract.project_execution_attributes)
+    monkeypatch.setattr(ins, "_request_scope_factory", telemetry_requests.request_scope)
+    monkeypatch.setattr(ins, "_request_snapshot", telemetry_requests.current_request_facts)
     instrumented.spans.clear()
     yield
     instrumented.spans.clear()
@@ -407,7 +412,7 @@ def test_server_exception_events_and_status_description_blocked(instrumented):
     servers = _server_spans(instrumented.spans)
     assert servers
     span = servers[0]
-    assert all(e.name == "http_request_completed" for e in span.events)
+    assert all(e.name == "nkb.http.completed" for e in span.events)
     if span.status is not None:
         assert not getattr(span.status, "description", None)
     assert SECRET_EXC not in json.dumps(
@@ -452,6 +457,7 @@ def test_sqlite_span_no_statement_text(instrumented):
                 assert forbidden not in attrs
             assert SECRET_SQL not in span.name
             assert SECRET_SQL not in json.dumps(attrs, default=str)
+            assert not any(event.name == "nkb.http.completed" for event in span.events)
             assert attrs.get("db.system") == "sqlite" or attrs.get(
                 "db.system.name"
             )
@@ -591,10 +597,13 @@ def test_http_request_completed_matches_server_span(instrumented, mode, monkeypa
         assert payload["span_id"] == format(contexts[0].span_id, "016x")
         assert payload["http.request.method"] == "POST"
         assert payload["http.route"] == "/retrieval/search"
-        assert payload["http.response.status_code"] == response.status_code
-        assert payload["duration_ms"] >= 0
-        assert payload["outcome"] == (
-            "error" if mode.endswith("error") else "completed"
+        if mode.endswith("error"):
+            assert "http.response.status_code" not in payload  # outer error middleware sends later
+        else:
+            assert payload["http.response.status_code"] == response.status_code
+        assert payload["nkb.http.duration_ms"] >= 0
+        assert payload["nkb.http.outcome"] == (
+            "failure" if mode.endswith("error") else "success"
         )
         assert "secret" not in json.dumps(payload)
         if mode.startswith("unsampled"):
@@ -717,7 +726,7 @@ def test_management_write_access_log_even_when_denoised(instrumented, monkeypatc
     assert method == "POST"
     assert route == "/admin/{redacted}"
     assert status == 404
-    assert outcome == "completed"
+    assert outcome == "failure"
 
 
 def test_http_completion_log_failure_does_not_break_response_or_span(
@@ -749,7 +758,7 @@ def test_outbound_request_event_and_log_once(instrumented, monkeypatch, sampled,
     monkeypatch.setattr(
         ins,
         "_http_caller",
-        lambda: "app.infrastructure.vector.qdrant_index:search",
+        lambda: "qdrant.request",
         raising=False,
     )
     try:
@@ -795,8 +804,8 @@ def test_outbound_request_event_and_log_once(instrumented, monkeypatch, sampled,
             payload = logs[0]
             assert payload["server.address"] == "models.example"
             assert payload["url.template"] == "/v1/models"
-            assert payload["nkb.http.caller"].endswith(":search")
-            assert payload["outcome"] == ("error" if status is None or status >= 500 else "completed")
+            assert payload["nkb.http.caller"] == "qdrant.request"
+            assert payload["nkb.http.outcome"] == ("failure" if status is None or status >= 400 else "success")
             assert payload["span_id"] != format(
                 trace_api.get_current_span().get_span_context().span_id, "016x"
             )
@@ -810,7 +819,7 @@ def test_outbound_request_event_and_log_once(instrumented, monkeypatch, sampled,
                     if s.context.span_id == int(payload["span_id"], 16)
                 )
                 assert span.parent is not None
-                events = [e for e in span.events if e.name == "http_client_completed"]
+                events = [e for e in span.events if e.name == "nkb.http.completed"]
                 assert len(events) == 1
                 assert SECRET_URL not in json.dumps(
                     {"attrs": dict(span.attributes or {}), "events": [dict(e.attributes or {}) for e in span.events]},
@@ -860,7 +869,7 @@ def test_outbound_cancelled_request_outcome(monkeypatch):
         try:
             asyncio.run(with_parent())
             assert len(logs) == 1
-            assert logs[0]["outcome"] == "cancelled"
+            assert logs[0]["nkb.http.outcome"] == "cancelled"
             assert logs[0]["url.template"] == "/private/{redacted}"
         finally:
             pass
@@ -914,21 +923,21 @@ def test_outbound_async_success_response_hook_and_completion(monkeypatch, instru
         assert response.status_code == 200
         assert len(logs) == 1, logs
         payload = logs[0]
-        assert payload["outcome"] == "completed"
+        assert payload["nkb.http.outcome"] == "success"
         assert payload["http.response.status_code"] == 200
         assert payload["server.address"] == "api.example"
         assert payload["url.template"] == "/v1/models"
-        assert payload["duration_ms"] >= 0
+        assert payload["nkb.http.duration_ms"] >= 0
         client_span = next(
             s for s in instrumented.spans if s.kind == SpanKind.CLIENT
         )
         assert client_span.attributes.get("http.response.status_code") == 200
         events = [
             e for e in client_span.events
-            if e.name == "http_client_completed"
+            if e.name == "nkb.http.completed"
         ]
         assert len(events) == 1
-        assert events[0].attributes.get("duration_ms") >= 0
+        assert events[0].attributes.get("nkb.http.duration_ms") >= 0
     finally:
         logger.removeHandler(handler)
 
@@ -992,7 +1001,7 @@ def test_sync_stream_defers_completion_until_read(instrumented, monkeypatch):
                 assert logs == [], "响应体未读完不得提前完成"
                 assert response.read() == b"0123456789"
                 assert len(logs) == 1, logs
-                assert logs[0]["outcome"] == "completed"
+                assert logs[0]["nkb.http.outcome"] == "success"
                 assert logs[0]["url.template"] == "/stream"
     finally:
         server.shutdown()
@@ -1028,7 +1037,7 @@ def test_sync_stream_close_without_read_logs_incomplete(instrumented, monkeypatc
                 response = client.send(request, stream=True)
                 response.close()
                 assert len(logs) == 1
-                assert logs[0]["outcome"] == "incomplete"
+                assert logs[0]["nkb.http.outcome"] == "unknown"
     finally:
         server.shutdown()
         server.server_close()
@@ -1088,7 +1097,7 @@ def test_stream_wrapper_unit_read_error_and_once(monkeypatch):
                 with pytest.raises(RuntimeError):
                     list(ins._SyncStream(Broken(), lifecycle2))
                 assert len(logs) == 2
-                assert logs[1]["outcome"] == "error"
+                assert logs[1]["nkb.http.outcome"] == "failure"
     finally:
         logger.removeHandler(handler)
         provider.shutdown()
@@ -1131,7 +1140,7 @@ async def test_async_stream_unit_lifecycle(monkeypatch):
                 span2.end()
                 await ins._AsyncStream(Underlying(), lifecycle2).aclose()
                 assert len(logs) == 2
-                assert logs[1]["outcome"] == "incomplete"
+                assert logs[1]["nkb.http.outcome"] == "unknown"
     finally:
         logger.removeHandler(handler)
         provider.shutdown()
@@ -1188,7 +1197,7 @@ def test_http_route_template_bounds_length(monkeypatch):
 def test_caller_identifies_application_function_without_reading_arguments():
     namespace = {"__name__": "app.infrastructure.vector.qdrant_index", "observe": ins._http_caller}
     exec("def search(secret):\n    return observe()\n", namespace)
-    assert namespace["search"]("PRIVATE") == "app.infrastructure.vector.qdrant_index:search"
+    assert namespace["search"]("PRIVATE") == "qdrant.request"
 
 
 # ---------------------------------------------------------------------------
@@ -1606,4 +1615,44 @@ def test_included_router_keeps_remote_context_and_single_server(prefix, sampled)
         else:
             assert not exporter.get_finished_spans()
     finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("mode,expected", [("success", "success"), ("denial", "denied"), ("timeout", "timed_out")])
+def test_sync_route_result_reaches_http_owner_without_spoofing(instrumented, monkeypatch, mode, expected):
+    from app.interfaces.http.errors import run_with_error_mapping, register_error_handlers
+    logs, handler, logger = _capture_http_logs(monkeypatch, obs_logging.HTTP_COMPLETED_EVENT)
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.post("/retrieval/search")
+    def search():
+        def action():
+            if mode == "denial":
+                raise ValueError("file_too_large")
+            if mode == "timeout":
+                raise TimeoutError()
+            return {"results": []}
+        return run_with_error_mapping(action)
+
+    provider = TracerProvider(sampler=ALWAYS_ON)
+    spans = []
+    provider.add_span_processor(SimpleSpanProcessor(_ListSpanExporter(spans)))
+    ins.instrument_app(app, settings=_Settings(), tracer_provider=provider)
+    try:
+        with TestClient(app) as client:
+            client.post("/retrieval/search", headers={"nkb.request.channel": "mcp_stdio", "baggage": "nkb.request.id=forged"})
+        assert len(logs) == 1
+        assert logs[0]["nkb.request.outcome"] == expected
+        assert logs[0]["nkb.request.channel"] == "api"
+        assert "nkb.request.id" not in logs[0]
+        span = next(s for s in spans if s.kind == SpanKind.SERVER)
+        event = next(e for e in span.events if e.name == "nkb.http.completed")
+        assert event.attributes["nkb.request.outcome"] == expected
+        assert span.attributes["nkb.request.outcome"] == expected
+        for key in ("nkb.http.outcome", "nkb.http.duration_ms", "nkb.request.duration_ms"):
+            assert event.attributes[key] == span.attributes[key] == logs[0][key]
+        assert not any(s.name == "request.handle" for s in spans)
+    finally:
+        logger.removeHandler(handler)
         provider.shutdown()

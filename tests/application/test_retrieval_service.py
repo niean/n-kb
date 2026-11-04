@@ -141,10 +141,10 @@ def test_search_wraps_nkb_retrieval_search_span_with_safe_attributes(span_export
     assert results == vector_index.results
     span = _last_retrieval_span(span_exporter)
     assert span.kind == trace.SpanKind.INTERNAL
-    assert span.attributes["nkb.result_count"] == 1
-    assert span.attributes["nkb.filter.tags"] == 1
-    assert span.attributes["nkb.filter.source_kind"] == 1
-    assert span.attributes["nkb.outcome"] == "success"
+    assert span.attributes["nkb.retrieval.result_count"] == 1
+    assert span.attributes["nkb.retrieval.filter_tags"] == 1
+    assert span.attributes["nkb.retrieval.filter_source_kind"] == 1
+    assert span.attributes["nkb.retrieval.outcome"] == "success"
     dumped = json.dumps(span.attributes, default=str)
     assert "find-the-secret-query" not in dumped
     assert "secret-tag-value" not in dumped
@@ -170,7 +170,7 @@ def test_search_records_retrieval_once_while_span_current(span_exporter, monkeyp
     outcome, kwargs = calls[0]
     assert outcome == ts.OUTCOME_SUCCESS
     assert kwargs["result_count"] == 1
-    assert kwargs["seconds"] >= 0
+    assert "seconds" not in kwargs
     assert current_names == [ts.RETRIEVAL_SPAN_NAME]
 
 
@@ -197,7 +197,7 @@ def test_search_error_records_once_without_results(span_exporter, monkeypatch):
     assert outcome == ts.OUTCOME_ERROR
     assert "result_count" not in kwargs or kwargs["result_count"] is None
     span = _last_retrieval_span(span_exporter)
-    assert span.attributes["nkb.outcome"] == "error"
+    assert span.attributes["nkb.retrieval.outcome"] == "failure"
     assert span.attributes["error.type"] == "vector_index_failed"
     assert span.status.status_code == trace.StatusCode.ERROR
 
@@ -223,7 +223,7 @@ def test_search_cancelled_propagates_and_records_once(span_exporter, monkeypatch
     assert len(calls) == 1
     assert calls[0][0] == ts.OUTCOME_CANCELLED
     span = _last_retrieval_span(span_exporter)
-    assert span.attributes["nkb.outcome"] == "cancelled"
+    assert span.attributes["nkb.retrieval.outcome"] == "cancelled"
     assert "error.type" not in span.attributes
 
 

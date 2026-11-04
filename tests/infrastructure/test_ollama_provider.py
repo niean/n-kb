@@ -277,7 +277,7 @@ def test_real_embedding_observer_emits_genai_client_span(span_exporter):
     assert span.attributes["gen_ai.operation.name"] == "embeddings"
     assert span.attributes["gen_ai.request.model"] == "bge-m3"
     assert span.attributes["gen_ai.usage.input_tokens"] == 11
-    assert span.attributes["nkb.outcome"] == "success"
+    assert span.attributes["nkb.model.outcome"] == "success"
 
 
 def test_real_embedding_observer_records_error_terminal_state(span_exporter):
@@ -296,5 +296,5 @@ def test_real_embedding_observer_records_error_terminal_state(span_exporter):
     span = spans[0]
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "embedding_failed"
-    assert span.attributes["nkb.outcome"] == "error"
+    assert span.attributes["nkb.model.outcome"] == "failure"
     assert "secret" not in str(span.attributes)

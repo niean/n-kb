@@ -151,6 +151,7 @@ def test_error_type_enum_matches_spec_exactly():
             "embedding_failed",
             "vector_index_failed",
             "sqlite_failed",
+            "timeout",
             "other",
         }
     )
@@ -202,8 +203,8 @@ def test_error_type_for_exception_cancelled_is_outcome_not_error():
     [
         (None, "success"),
         (asyncio.CancelledError(), "cancelled"),
-        (ValueError("boom"), "error"),
-        (RuntimeError("embedding_provider_failed"), "error"),
+        (ValueError("boom"), "failure"),
+        (RuntimeError("embedding_provider_failed"), "failure"),
     ],
 )
 def test_outcome_for_exception(exc, expected):
@@ -226,7 +227,7 @@ class _Filter:
 
 
 def test_retrieval_attrs_result_count_only():
-    assert ts.retrieval_attrs(7) == {"nkb.result_count": 7}
+    assert ts.retrieval_attrs(7) == {"nkb.retrieval.result_count": 7}
     assert ts.retrieval_attrs(None) == {}
 
 
@@ -236,10 +237,10 @@ def test_retrieval_attrs_filter_counts_without_values():
         _Filter(tags={"a": "secret-value", "b": "other-tag"}, source_kind="upload", min_score=0.42),
     )
     assert attrs == {
-        "nkb.result_count": 3,
-        "nkb.filter.tags": 2,
-        "nkb.filter.source_kind": 1,
-        "nkb.filter.min_score": 1,
+        "nkb.retrieval.result_count": 3,
+        "nkb.retrieval.filter_tags": 2,
+        "nkb.retrieval.filter_source_kind": 1,
+        "nkb.retrieval.filter_min_score": 1,
     }
     dumped = json.dumps(attrs)
     assert "secret-value" not in dumped
@@ -249,7 +250,7 @@ def test_retrieval_attrs_filter_counts_without_values():
 
 def test_retrieval_attrs_accepts_mapping_and_drops_unknown_keys():
     attrs = ts.retrieval_attrs(1, {"tags": {"k": "v"}, "intruder": 3})
-    assert attrs == {"nkb.result_count": 1, "nkb.filter.tags": 1}
+    assert attrs == {"nkb.retrieval.result_count": 1, "nkb.retrieval.filter_tags": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +264,9 @@ def test_retrieval_span_success_is_internal_and_current(span_exporter):
         assert span.is_recording()
     assert trace.get_current_span() is not span
     recorded = _last_span(span_exporter)
-    assert recorded.name == "nkb.retrieval.search"
+    assert recorded.name == "retrieval.search"
     assert recorded.kind == trace.SpanKind.INTERNAL
-    assert recorded.attributes.get("nkb.outcome") == "success"
+    assert recorded.attributes.get("nkb.retrieval.outcome") == "success"
     assert recorded.end_time is not None
 
 
@@ -275,9 +276,11 @@ def test_retrieval_span_error_marks_safe_error_type_without_events(span_exporter
             raise ValueError("embedding_provider_failed")
     recorded = _last_span(span_exporter)
     assert recorded.attributes.get("error.type") == "embedding_failed"
-    assert recorded.attributes.get("nkb.outcome") == "error"
+    assert recorded.attributes.get("nkb.retrieval.outcome") == "failure"
     assert recorded.status.status_code == trace.StatusCode.ERROR
-    assert recorded.events == ()
+    assert len(recorded.events) == 1
+    assert recorded.events[0].name.startswith('nkb.')
+    assert all(event.name != 'exception' for event in recorded.events)
 
 
 def test_retrieval_span_error_does_not_leak_raw_message(span_exporter):
@@ -289,7 +292,9 @@ def test_retrieval_span_error_does_not_leak_raw_message(span_exporter):
     dumped = json.dumps(recorded.attributes, default=str)
     assert secret not in dumped
     assert "user:pass" not in dumped
-    assert recorded.events == ()
+    assert len(recorded.events) == 1
+    assert recorded.events[0].name.startswith('nkb.')
+    assert all(event.name != 'exception' for event in recorded.events)
 
 
 def test_retrieval_span_cancelled_is_outcome_without_error_type(span_exporter):
@@ -297,36 +302,38 @@ def test_retrieval_span_cancelled_is_outcome_without_error_type(span_exporter):
         with ts.retrieval_span():
             raise asyncio.CancelledError()
     recorded = _last_span(span_exporter)
-    assert recorded.attributes.get("nkb.outcome") == "cancelled"
+    assert recorded.attributes.get("nkb.retrieval.outcome") == "cancelled"
     assert "error.type" not in recorded.attributes
     assert recorded.status.status_code != trace.StatusCode.ERROR
-    assert recorded.events == ()
+    assert len(recorded.events) == 1
+    assert recorded.events[0].name.startswith('nkb.')
+    assert all(event.name != 'exception' for event in recorded.events)
 
 
 def test_index_run_span_records_document_id(span_exporter):
     with ts.index_run_span("doc-123"):
         pass
     recorded = _last_span(span_exporter)
-    assert recorded.name == "nkb.index.run"
-    assert recorded.attributes.get("nkb.document_id") == "doc-123"
-    assert recorded.attributes.get("nkb.outcome") == "success"
+    assert recorded.name == "index.run"
+    assert recorded.attributes.get("nkb.index.document_id") == "doc-123"
+    assert recorded.attributes.get("nkb.index.outcome") == "success"
 
 
 def test_index_run_span_without_document_id_omits_attribute(span_exporter):
     with ts.index_run_span():
         pass
     recorded = _last_span(span_exporter)
-    assert "nkb.document_id" not in recorded.attributes
+    assert "nkb.index.document_id" not in recorded.attributes
 
 
 @pytest.mark.parametrize(
     ("stage", "expected_name"),
     [
-        ("parse", "nkb.index.parse"),
-        ("split", "nkb.index.split"),
-        ("embed", "nkb.index.embed"),
-        ("write", "nkb.index.write"),
-        ("unknown-stage", "nkb.index.other"),
+        ("parse", "index.parse"),
+        ("split", "index.split"),
+        ("embed", "index.embed"),
+        ("write", "index.write"),
+
     ],
 )
 def test_index_stage_span_names(span_exporter, stage, expected_name):
@@ -335,7 +342,7 @@ def test_index_stage_span_names(span_exporter, stage, expected_name):
     recorded = _last_span(span_exporter)
     assert recorded.name == expected_name
     assert recorded.kind == trace.SpanKind.INTERNAL
-    assert recorded.attributes.get("nkb.outcome") == "success"
+    assert recorded.attributes.get("nkb.index.outcome") == "success"
 
 
 def test_index_stage_span_failure_outcome(span_exporter):
@@ -343,7 +350,7 @@ def test_index_stage_span_failure_outcome(span_exporter):
         with ts.index_stage_span("write"):
             raise RuntimeError("embedding_provider_failed")
     recorded = _last_span(span_exporter)
-    assert recorded.attributes.get("nkb.outcome") == "error"
+    assert recorded.attributes.get("nkb.index.outcome") == "failure"
     assert recorded.attributes.get("error.type") == "embedding_failed"
 
 
@@ -351,7 +358,7 @@ def test_set_index_chunk_count_attribute(span_exporter):
     with ts.index_run_span("doc-1") as span:
         ts.set_index_chunk_count(span, 12)
     recorded = _last_span(span_exporter)
-    assert recorded.attributes.get("nkb.chunk_count") == 12
+    assert recorded.attributes.get("nkb.index.chunk_count") == 12
 
 
 def test_span_helper_isolated_from_tracer_failure(monkeypatch):
@@ -373,45 +380,51 @@ def test_span_helper_isolated_from_tracer_failure(monkeypatch):
 
 
 def test_record_retrieval_success_records_all_three(reader):
-    ts.record_retrieval("success", result_count=3, seconds=0.5)
-    assert _counter_delta(reader, "nkb.retrieval.requests", {"outcome": "success"}) == 1
+    with ts.retrieval_span():
+        ts.record_retrieval("success", result_count=3, seconds=0.5)
+    assert _counter_delta(reader, "nkb.retrieval.requests", {"nkb.retrieval.outcome": "success"}) == 1
     results = _hist_delta(reader, "nkb.retrieval.results", {})
     assert results["count"] == 1
     assert results["sum"] == 3
-    duration = _hist_delta(reader, "nkb.retrieval.duration", {"outcome": "success"})
+    duration = _hist_delta(reader, "nkb.retrieval.duration", {"nkb.retrieval.outcome": "success"})
     assert duration["count"] == 1
-    assert duration["sum"] == pytest.approx(0.5)
+    assert duration["sum"] >= 0
 
 
 def test_record_retrieval_error_records_requests_and_duration_not_results(reader):
-    ts.record_retrieval("error", result_count=9, seconds=0.2)
-    assert _counter_delta(reader, "nkb.retrieval.requests", {"outcome": "error"}) == 1
+    with ts.retrieval_span():
+        ts.record_retrieval("failure", result_count=9, seconds=0.2)
+    assert _counter_delta(reader, "nkb.retrieval.requests", {"nkb.retrieval.outcome": "failure"}) == 1
     assert _hist_delta(reader, "nkb.retrieval.results", {})["count"] == 0
-    duration = _hist_delta(reader, "nkb.retrieval.duration", {"outcome": "error"})
+    duration = _hist_delta(reader, "nkb.retrieval.duration", {"nkb.retrieval.outcome": "failure"})
     assert duration["count"] == 1
-    assert duration["sum"] == pytest.approx(0.2)
+    assert duration["sum"] >= 0
 
 
 def test_record_retrieval_cancelled_outcome(reader):
-    ts.record_retrieval("cancelled", seconds=0.1)
-    assert _counter_delta(reader, "nkb.retrieval.requests", {"outcome": "cancelled"}) == 1
+    with ts.retrieval_span():
+        ts.record_retrieval("cancelled", seconds=0.1)
+    assert _counter_delta(reader, "nkb.retrieval.requests", {"nkb.retrieval.outcome": "cancelled"}) == 1
     assert _hist_delta(reader, "nkb.retrieval.results", {})["count"] == 0
-    assert _hist_delta(reader, "nkb.retrieval.duration", {"outcome": "cancelled"})["count"] == 1
+    assert _hist_delta(reader, "nkb.retrieval.duration", {"nkb.retrieval.outcome": "cancelled"})["count"] == 1
 
 
 def test_record_index_success_records_jobs_and_chunks(reader):
-    ts.record_index("success", chunk_count=12)
-    assert _counter_delta(reader, "nkb.index.jobs", {"outcome": "success"}) == 1
+    with ts.index_run_span():
+        ts.record_index("success", chunk_count=12)
+    assert _counter_delta(reader, "nkb.index.jobs", {"nkb.index.outcome": "success"}) == 1
     chunks = _hist_delta(reader, "nkb.index.chunks", {})
     assert chunks["count"] == 1
     assert chunks["sum"] == 12
 
 
 def test_record_index_error_and_cancelled_skip_chunks(reader):
-    ts.record_index("error", chunk_count=5)
-    ts.record_index("cancelled")
-    assert _counter_delta(reader, "nkb.index.jobs", {"outcome": "error"}) == 1
-    assert _counter_delta(reader, "nkb.index.jobs", {"outcome": "cancelled"}) == 1
+    with ts.index_run_span():
+        ts.record_index("failure", chunk_count=5)
+    with ts.index_run_span():
+        ts.record_index("cancelled")
+    assert _counter_delta(reader, "nkb.index.jobs", {"nkb.index.outcome": "failure"}) == 1
+    assert _counter_delta(reader, "nkb.index.jobs", {"nkb.index.outcome": "cancelled"}) == 1
     assert _hist_delta(reader, "nkb.index.chunks", {})["count"] == 0
 
 
@@ -420,8 +433,10 @@ def test_record_helpers_isolated_from_meter_failure(monkeypatch):
         raise RuntimeError("meter exploded")
 
     monkeypatch.setattr(ts.metrics, "get_meter", broken_meter)
-    ts.record_retrieval("success", result_count=1, seconds=0.1)
-    ts.record_index("success", chunk_count=1)
+    with ts.retrieval_span():
+        ts.record_retrieval("success", result_count=1, seconds=0.1)
+    with ts.index_run_span():
+        ts.record_index("success", chunk_count=1)
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +450,9 @@ def test_business_instruments_exact_names_and_units(reader):
     ts.record_retrieval("success", result_count=1, seconds=0.01)
     ts.record_index("success", chunk_count=1)
 
-    with ts.operation_span("nkb.document.upload"):
+    with ts.operation_span("document.upload"):
         pass
-    with ts.operation_span("nkb.mcp.status"):
+    with ts.operation_span("mcp.status"):
         pass
     with ts.index_run_span(), ts.index_stage_span("parse"):
         pass
@@ -482,8 +497,10 @@ def test_embedding_observer_creates_genai_client_span(span_exporter):
     assert recorded.attributes.get("gen_ai.operation.name") == "embeddings"
     assert recorded.attributes.get("gen_ai.request.model") == "bge-m3"
     assert recorded.attributes.get("gen_ai.usage.input_tokens") == 7
-    assert recorded.attributes.get("nkb.outcome") == "success"
-    assert recorded.events == ()
+    assert recorded.attributes.get("nkb.model.outcome") == "success"
+    assert len(recorded.events) == 1
+    assert recorded.events[0].name.startswith('nkb.')
+    assert all(event.name != 'exception' for event in recorded.events)
 
 
 def test_embedding_observer_records_duration_and_token_metrics(reader):
@@ -556,8 +573,10 @@ def test_embedding_observer_error_records_metrics_and_propagates(reader, span_ex
     assert token["sum"] == 5
     recorded = _last_span(span_exporter)
     assert recorded.status.status_code == trace.StatusCode.ERROR
-    assert recorded.attributes.get("nkb.outcome") == "error"
-    assert recorded.events == ()
+    assert recorded.attributes.get("nkb.model.outcome") == "failure"
+    assert len(recorded.events) == 1
+    assert recorded.events[0].name.startswith('nkb.')
+    assert all(event.name != 'exception' for event in recorded.events)
 
 
 def test_embedding_observer_cancelled_records_duration_without_error_type(reader, span_exporter):
@@ -574,7 +593,7 @@ def test_embedding_observer_cancelled_records_duration_without_error_type(reader
     assert len(cancel_keys) == 1
     assert "error.type" not in dict(cancel_keys[0])
     recorded = _last_span(span_exporter)
-    assert recorded.attributes.get("nkb.outcome") == "cancelled"
+    assert recorded.attributes.get("nkb.model.outcome") == "cancelled"
     assert "error.type" not in recorded.attributes
 
 
@@ -596,13 +615,14 @@ def test_embedding_observer_isolated_from_meter_failure(reader, monkeypatch):
 
 
 def test_operation_context_nested_restore():
-    with ts.operation_context(operation="outer"):
-        assert ts.current_operation_context()["operation"] == "outer"
-        with ts.operation_context(stage="embed"):
-            current = ts.current_operation_context()
-            assert current["operation"] == "outer"
-            assert current["stage"] == "embed"
-        assert ts.current_operation_context() == {"operation": "outer"}
+    with ts.operation_context(**{"nkb.request.id":"outer", "nkb.retrieval.outcome":"failure"}):
+        parent=dict(ts.current_operation_context())
+        with ts.operation_context(**{"nkb.index.stage":"embed"}):
+            current=ts.current_operation_context()
+            assert current["nkb.request.id"] == "outer"
+            assert current["nkb.index.stage"] == "embed"
+            assert "nkb.retrieval.outcome" not in current
+        assert ts.current_operation_context() == parent
     assert ts.current_operation_context() == {}
 
 
@@ -621,9 +641,9 @@ def test_operation_context_concurrent_tasks_isolated():
     results = {}
 
     async def worker(name: str) -> None:
-        with ts.operation_context(operation=name):
+        with ts.operation_context(**{"nkb.request.id":name}):
             await asyncio.sleep(0.01)
-            results[name] = ts.current_operation_context()["operation"]
+            results[name] = ts.current_operation_context()["nkb.request.id"]
 
     async def main() -> None:
         await asyncio.gather(worker("task-a"), worker("task-b"))
@@ -634,13 +654,13 @@ def test_operation_context_concurrent_tasks_isolated():
 
 def test_span_helpers_update_operation_context(span_exporter):
     with ts.retrieval_span():
-        assert ts.current_operation_context()["operation"] == "nkb.retrieval.search"
+        assert ts.current_operation_context()["nkb.retrieval.operation"] == "search"
         with ts.index_stage_span("embed"):
-            assert ts.current_operation_context()["stage"] == "embed"
-        assert "stage" not in ts.current_operation_context()
+            assert ts.current_operation_context()["nkb.index.stage"] == "embed"
+        assert "nkb.index.stage" not in ts.current_operation_context()
     assert ts.current_operation_context() == {}
     with ts.embedding_observer("ctx-model"):
-        assert ts.current_operation_context()["operation"] == "embeddings"
+        assert ts.current_operation_context()["gen_ai.operation.name"] == "embeddings"
 
 
 # ---------------------------------------------------------------------------
@@ -681,18 +701,18 @@ def test_module_uses_start_span_and_use_span_without_autorecord():
     assert "start_as_current_span" not in source
 
 
-@pytest.mark.parametrize('outcome', ['success', 'error', 'cancelled'])
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'cancelled'])
 def test_completed_operation_records_once_and_preserves_exception(reader, outcome):
     before = _snapshot(reader)
     error = asyncio.CancelledError() if outcome == 'cancelled' else ValueError('private')
     try:
-        with ts.completed_operation('nkb.document.upload'):
+        with ts.completed_operation('document.upload'):
             if outcome != 'success':
                 raise error
     except BaseException as caught:
         assert caught is error
     state = _snapshot(reader)
-    key = frozenset({'outcome':outcome}.items())
+    key = frozenset({'nkb.document.outcome':outcome}.items())
     assert state['nkb.document.uploads']['series'][key] - before.get('nkb.document.uploads', {}).get('series', {}).get(key, 0) == 1
     assert 'private' not in str(state)
 

@@ -4,6 +4,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.application import telemetry_requests, telemetry_semantics
+
 
 KNOWN_VALUE_ERROR_CODES = {
     "unsupported_file_type",
@@ -30,6 +32,9 @@ def stable_error_payload(code: str) -> dict[str, dict[str, str]]:
 
 
 def raise_stable_error(code: str, status_code: int) -> None:
+    telemetry_requests.record_result(
+        "denied" if code in {"unsupported_file_type", "file_too_large", "invalid_tags", "validation_error"} else "failure"
+    )
     raise HTTPException(status_code=status_code, detail=stable_error_payload(code))
 
 
@@ -52,11 +57,17 @@ def normalize_value_error_code(exc: ValueError) -> str:
 
 def run_with_error_mapping(action: Callable[[], Any], runtime_code: str = "infrastructure_error") -> Any:
     try:
-        return action()
+        result = action()
+        telemetry_requests.record_result("success")
+        return result
     except HTTPException:
         raise
     except ValueError as exc:
         code = normalize_value_error_code(exc)
         raise_stable_error(code, VALIDATION_STATUS_CODES.get(code, 400))
-    except Exception:
+    except Exception as exc:
+        telemetry_requests.record_result(telemetry_semantics.outcome_for_exception(exc))
         raise_stable_error(runtime_code, 502)
+    except BaseException as exc:
+        telemetry_requests.record_result(telemetry_semantics.outcome_for_exception(exc))
+        raise

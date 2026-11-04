@@ -26,7 +26,8 @@ def runtime():
     sanitizer.bind_details(configure=details.configure_details, project=details.project_details,
                            validate=details.validate_details, flatten=details.flatten_details)
     sanitizer.configure_details(safe.sanitize, 2048)
-    logs.configure_execution_context(project=details.project_details, validate=details.validate_details,
+    from app.application.telemetry_contract import project_execution_attributes
+    logs.configure_execution_context(execution_project=project_execution_attributes, project=details.project_details, validate=details.validate_details,
         flatten=details.flatten_details, budget=details.budget_details, details_snapshot=details.current_details)
     logger = logging.getLogger(logs.__name__)
     level = logger.level
@@ -45,12 +46,12 @@ def runtime():
 
 def assert_exchange(span, request_text, response_text):
     attrs = dict(span.attributes)
-    assert request_text in attrs['nkb.details.http_request.content']
-    assert response_text in attrs['nkb.details.http_response.content']
+    assert request_text in attrs['nkb.content.http_request']
+    assert response_text in attrs['nkb.content.http_response']
     assert 'http-secret-sentinel' not in json.dumps(attrs)
     assert len(span.events) == 1
     for key in ('http_request', 'http_response'):
-        name = 'nkb.details.' + key + '.content'
+        name = 'nkb.content.' + key
         assert span.events[0].attributes[name] == attrs[name]
 
 
@@ -160,5 +161,5 @@ def test_server_send_failure_does_not_record_success_or_swallow_error(runtime):
     assert caught.value is error
     finished = exporter.get_finished_spans()[0]
     assert len(finished.events) == 1
-    assert finished.events[0].attributes['outcome'] == 'error'
-    assert finished.attributes['nkb.details.http_response.incomplete'] is True
+    assert finished.events[0].attributes['nkb.http.outcome'] == 'failure'
+    assert finished.attributes['nkb.content.http_response_incomplete'] is True

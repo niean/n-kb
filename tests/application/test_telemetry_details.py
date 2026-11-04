@@ -8,7 +8,7 @@ from app.infrastructure.observability.sanitizer import LogSanitizer
 def configured():
     s = LogSanitizer()
     s.configure_secret_catalog({"catalog-secret"})
-    d.configure_details(s.sanitize)
+    d.configure_details(s.sanitize, 2048)
     yield
     d.configure_details(None)
 
@@ -42,7 +42,7 @@ def test_complete_size_and_incomplete_traversal():
     item = d.project_details(log_fields=cyclic)["log_fields"]
     assert item["original_bytes"] is None
     assert item["incomplete"]
-    assert "nkb.details.log_fields.original_bytes" not in d.flatten_details({"log_fields":item})
+    assert "nkb.content.log_fields_original_bytes" not in d.flatten_details({"log_fields":item})
 
 
 def test_forged_envelope_is_sanitized():
@@ -72,7 +72,7 @@ def test_partial_credentials_fail_closed():
 
 def test_flatten_preserves_known_complete_size_and_detects_mutation():
     item = d.project_details(error="x"*3000)
-    assert d.flatten_details(item)["nkb.details.error.original_bytes"] == 3000
+    assert d.flatten_details(item)["nkb.content.error_original_bytes"] == 3000
     item["error"]["content"] = "password=hidden"
     assert "hidden" not in json.dumps(d.validate_details(item))
 
@@ -175,4 +175,4 @@ def test_old_envelopes_respect_smaller_content_limit():
     d.configure_details(sanitizer.sanitize)
     result = d.project_details(error="abcdefghij")
     d.configure_details(sanitizer.sanitize, max_bytes=1, max_total_bytes=1000)
-    assert len(d.flatten_details(result)["nkb.details.error.content"].encode()) <= 1
+    assert len(d.flatten_details(result)["nkb.content.error"].encode()) <= 1

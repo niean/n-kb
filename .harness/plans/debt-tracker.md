@@ -5,6 +5,7 @@
 | D001 | pytest 运行时 FastAPI TestClient 触发 StarletteDeprecationWarning，后续需迁移到 httpx2 兼容路径并清除警告 | low | N/A | 2026-08-29 | resolved |
 
 | D002 | FastAPI/Starlette依赖未锁定，宿主0.136与容器0.162的路由树语义不同；本次已修复观测兼容并验证双版本，后续需统一依赖约束/部署版本回归环境 | medium | N/A | 2026-10-30 | open |
+| D006 | 自动埋点曾将 SQLite CLIENT 按 HTTP 生命周期发布完成事件；规范化任务已按 instrument scope 与 DB 属性区分，增加不产生 HTTP 完成事件回归 | medium | plan-261104-normalize-observability.md | 2026-11-04 | resolved |
 
 ---
 

@@ -56,6 +56,10 @@ def test_queries_cover_actual_registry_and_filter_contract(dashboards):
     assert 'service_instance_id=~' not in queries
     assert '${instance' not in queries
     assert 'process_memory_usage_bytes' in queries
+    for label in ('nkb_document_outcome', 'nkb_index_outcome', 'nkb_index_stage', 'nkb_retrieval_outcome', 'nkb_mcp_outcome', 'nkb_mcp_operation'):
+        assert label in queries
+    import re
+    assert not re.search(r'(?<![\w])(?:outcome|stage|operation)(?:=|\))', queries)
     variables = overview['templating']['list']
     assert len(variables) == 1
     assert variables[0]['name'] == 'service'
@@ -76,9 +80,9 @@ def test_collector_only_projects_approved_nkb_facts():
     statements = collector['processors']['transform/loki_json']['log_statements'][0]['statements']
     nkb = [s for s in statements if 'resource.attributes["service.name"] == "n-kb"' in s]
     assert nkb
-    for field in ('outcome', 'duration_ms', 'result_count', 'chunk_count', 'stage'):
+    for field in ('nkb.document.outcome', 'nkb.index.duration_ms', 'nkb.retrieval.result_count', 'nkb.index.chunk_count', 'nkb.index.stage'):
         assert any(f'attributes["{field}"]' in s for s in nkb)
-    assert all('query' not in s and 'body' not in s and 'MergeMaps' not in s for s in nkb)
+    assert all('MergeMaps' not in s for s in nkb)
     assert collector['service']['pipelines']['logs']['exporters'] == ['otlphttp/loki', 'debug']
 
 
@@ -88,6 +92,7 @@ def test_dashboard_statistical_contracts_and_mapping(dashboards):
     for name, spec in INSTRUMENTS.items():
         row = next(line for line in mapping.splitlines() if line.startswith(f'| {name} |'))
         assert spec.kind in row and spec.unit in row
+        assert row.split('|')[4].strip() == (', '.join(spec.allowed_dimensions) or '无业务维度')
         for boundary in spec.boundaries:
             assert str(boundary) in row
     assert '| nagent.' not in mapping and '| gen_ai.client.inference.' not in mapping
@@ -96,15 +101,15 @@ def test_dashboard_statistical_contracts_and_mapping(dashboards):
         expression = panel['targets'][0]['expr']
         if '错误率' in panel['title']:
             numerator, denominator = expression.split(' / ', 1)
-            assert 'outcome="error"' in numerator
-            assert 'outcome=~"success|error"' in denominator
-            assert 'cancelled' not in expression
+            assert 'outcome=~"failure|timed_out"' in numerator
+            assert 'outcome=~"success|failure|timed_out"' in denominator
+            assert 'cancelled' not in expression and 'denied' not in expression
             assert denominator.endswith(' > 0)')
         if 'p95' in panel['title']:
             assert expression.startswith('histogram_quantile(0.95, sum by (le')
             assert '(rate(' in expression and '_bucket{' in expression
         if '吞吐' in panel['title']:
-            assert expression.startswith('sum by (outcome) (rate(')
+            assert expression.startswith('sum by (nkb_') and '_outcome) (rate(' in expression
     empty = next(p for p in panels if '空命中' in p['title'])['targets'][0]['expr']
     numerator, denominator = empty.split(' / ', 1)
     assert 'nkb_retrieval_results_bucket{' in numerator and 'le="0"' in numerator

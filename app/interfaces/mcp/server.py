@@ -53,6 +53,7 @@ def create_mcp_server(
     settings: Settings,
     *,
     suppress_scope: SuppressScopeFactory | None = None,
+    channel: str = "mcp_http",
 ) -> FastMCP:
     scope_factory = suppress_scope or noop_suppress_scope
     mcp = FastMCP(
@@ -73,7 +74,8 @@ def create_mcp_server(
     )
     def status() -> dict[str, Any]:
         try:
-            with telemetry_semantics.operation_span("nkb.mcp.status"), scope_factory():
+            with (telemetry_semantics.operation_context(**{"nkb.request.channel": channel}),
+                  telemetry_semantics.operation_span("mcp.status"), scope_factory()):
                 return mcp_status_payload(health_service)
         except Exception:
             raise RuntimeError("infrastructure_error") from None
@@ -86,9 +88,10 @@ def create_mcp_app(
     settings: Settings,
     *,
     suppress_scope: SuppressScopeFactory | None = None,
+    channel: str = "mcp_http",
 ) -> tuple[FastMCP, Any]:
     """构造 MCP server 与其 Streamable HTTP ASGI app（status 端点由组合根注册）。"""
-    server = create_mcp_server(health_service, settings, suppress_scope=suppress_scope)
+    server = create_mcp_server(health_service, settings, suppress_scope=suppress_scope, channel=channel)
 
     return (
         server,

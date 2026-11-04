@@ -21,6 +21,7 @@ import time
 import weakref
 from itertools import islice
 from contextvars import ContextVar
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -33,8 +34,10 @@ from . import sanitizer as detail_policy
 # Registry lookup fallback; project_record classifies readable unknown logs.
 UNKNOWN_EVENT_CODE = "diagnostic_log"
 DIAGNOSTIC_EVENT_CODE = "diagnostic_log"
-HTTP_COMPLETED_EVENT = "http_request_completed"
-HTTP_CLIENT_COMPLETED_EVENT = "http_client_completed"
+HTTP_COMPLETED_EVENT = "nkb.http.completed"
+HTTP_CLIENT_COMPLETED_EVENT = "nkb.http.completed"
+_LIFECYCLE_EVENTS = frozenset(f"nkb.{obj}.completed" for obj in
+    ("document", "index", "retrieval", "model", "mcp", "http"))
 
 # 观测自激防护：这些 logger 的记录绝不进入 OTel 桥。
 _SELF_TRAFFIC_PREFIXES = ("opentelemetry", "grpc")
@@ -49,7 +52,7 @@ _BUILTIN_EVENTS = (
 _EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 # 访问事实结果的固定枚举。
-_OUTCOMES = frozenset(("completed", "error", "cancelled", "incomplete"))
+_OUTCOMES = frozenset(("success", "failure", "denied", "cancelled", "timed_out", "skipped", "deferred", "unknown"))
 
 _OBS_LOGGER_NAME = __name__
 
@@ -61,8 +64,11 @@ _sanitizer: LogSanitizer | None = None
 _boundary_warned = False
 _OWNED_ATTR = "_nkb_observability_owned"
 _execution_context_snapshot = None
+_execution_project = None
+_completion_records = weakref.WeakKeyDictionary()
+_published_records = weakref.WeakSet()
 _detail_callbacks = {}
-_content_max_bytes = 2048
+_content_max_bytes = 1024000
 _projection_generation = 0
 _prepared_records = weakref.WeakKeyDictionary()
 _owned_records = weakref.WeakKeyDictionary()
@@ -76,13 +82,17 @@ _last_diagnostic_at = 0.0
 
 def configure_execution_context(*, snapshot=None, project=None, validate=None,
                                 flatten=None, details_snapshot=None, budget=None,
-                                max_bytes=2048):
+                                max_bytes=1024000, execution_project=None):
     """Composition injects Application context without reversing dependency."""
-    global _execution_context_snapshot, _detail_callbacks, _content_max_bytes, _projection_generation
+    global _execution_context_snapshot, _execution_project, _detail_callbacks, _content_max_bytes, _projection_generation
     _execution_context_snapshot = snapshot
+    _execution_project = execution_project
+    from .snapshots import configure_execution_projector
+    configure_execution_projector(execution_project)
+    _completion_records.clear()
     _detail_callbacks = dict(project=project, validate=validate, flatten=flatten,
                             details_snapshot=details_snapshot, budget=budget)
-    _content_max_bytes = max(1, min(65536, max_bytes))
+    _content_max_bytes = max(1, min(1024000, max_bytes))
     _projection_generation += 1
     _prepared_records.clear()
     _owned_records.clear()
@@ -213,16 +223,16 @@ def project_flat_details(attributes):
         return {}
     envelopes = {}
     for name in detail_policy.FIELDS:
-        prefix = "nkb.details." + name + "."
-        content = attributes.get(prefix + "content")
+        prefix = "nkb.content." + name
+        content = attributes.get(prefix)
         if type(content) is not str:
             continue
         envelopes[name] = dict(content=content,
-            original_bytes=attributes.get(prefix + "original_bytes"),
-            truncated=attributes.get(prefix + "truncated", False))
+            original_bytes=attributes.get(prefix + "_original_bytes"),
+            truncated=attributes.get(prefix + "_truncated", False))
         for key in ("incomplete", "observed_bytes"):
-            if prefix + key in attributes:
-                envelopes[name][key] = attributes[prefix + key]
+            if prefix + "_" + key in attributes:
+                envelopes[name][key] = attributes[prefix + "_" + key]
     safe = _call("validate", envelopes)
     _, _, safe = _fit_content(None, None, safe, {})
     return _call("flatten", safe)
@@ -248,11 +258,11 @@ def fit_safe_flat_details(flat):
     """Fit only already projected detail buffers; never retain raw inputs."""
     envelopes = {}
     for name in detail_policy.FIELDS:
-        prefix = "nkb.details."+name+"."
-        if prefix+"content" not in flat:
+        prefix = "nkb.content."+name
+        if prefix not in flat:
             continue
-        envelopes[name] = {key:flat[prefix+key] for key in
-            ("content","original_bytes","truncated","incomplete","observed_bytes") if prefix+key in flat}
+        envelopes[name] = {key:flat[(prefix if key == "content" else prefix+"_"+key)] for key in
+            ("content","original_bytes","truncated","incomplete","observed_bytes") if (prefix if key == "content" else prefix+"_"+key) in flat}
         envelopes[name].setdefault("original_bytes",None)
     _, _, safe = _fit_content(None,None,envelopes,{})
     return _call("flatten",safe)
@@ -266,10 +276,10 @@ def project_event_attributes(attributes):
     flat = project_flat_details(attributes)
     envelopes = {}
     for name in detail_policy.FIELDS:
-        prefix = "nkb.details." + name + "."
-        if prefix + "content" in flat:
-            envelopes[name] = {key:flat[prefix+key] for key in
-                ("content","original_bytes","truncated","incomplete","observed_bytes") if prefix+key in flat}
+        prefix = "nkb.content." + name
+        if prefix in flat:
+            envelopes[name] = {key:flat[(prefix if key == "content" else prefix+"_"+key)] for key in
+                ("content","original_bytes","truncated","incomplete","observed_bytes") if (prefix if key == "content" else prefix+"_"+key) in flat}
             envelopes[name].setdefault("original_bytes", None)
     text = {}
     for key in ("message", "exception.type", "exception.message", "exception.stacktrace"):
@@ -286,9 +296,10 @@ def project_event_attributes(attributes):
     return safe
 
 
-_DETAIL_ATTRIBUTE_KEYS = frozenset("nkb.details."+name+"."+key
-    for name in detail_policy.FIELDS
-    for key in ("content", "original_bytes", "truncated", "incomplete", "observed_bytes"))
+_DETAIL_ATTRIBUTE_KEYS = frozenset(
+    "nkb.content."+name+suffix for name in detail_policy.FIELDS
+    for suffix in ("", "_original_bytes", "_truncated", "_incomplete", "_observed_bytes"))
+
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +478,7 @@ def _call(name, *args, **kwargs):
 
 def _body_size(message, exception, details):
     nested = dict(message=message, exception=exception, details=details)
-    flat = {"nkb.details."+name+"."+key:value
+    flat = {("nkb.content."+name if key == "content" else "nkb.content."+name+"_"+key):value
             for name,item in details.items() for key,value in item.items() if value is not None}
     if message:
         flat["message"] = message
@@ -486,7 +497,7 @@ def _fit_content(message, exception, details, facts):
     # Fixed facts/identity are intentionally excluded from this content budget.
     if total < _body_size(None, None, {}):
         message, exception, details = None, None, {}
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
     else:
         while _body_size(message, exception, {}) > total:
             if exception and exception.get("stacktrace"):
@@ -507,9 +518,9 @@ def _fit_content(message, exception, details, facts):
             details = _call("budget", details, remaining)
         if _body_size(message, exception, details) > total:
             details = {}
-            facts["details_unavailable"] = True
+            facts["nkb.observation.error"] = "details_unavailable"
     if getattr(details,"details_unavailable",False):
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
     return message, exception, details
 
 
@@ -531,7 +542,20 @@ def _prepare_record(record):
     cached = _prepared_records.get(record)
     if cached is not None and cached[0] == version:
         return cached[1]
+    completion = _completion_records.get(record)
+    if completion is not None:
+        attrs = dict(completion.attributes)
+        facts = project_log_attributes(attrs)
+        details = _envelopes_from_flat(attrs)
+        message = next((value for key,value in attrs.items() if key.endswith(".summary")), completion.event)
+        prepared = Prepared(completion.event, message, None, details, facts,
+                            None, attrs, trace_api.get_current_span(), completion.trace_id,
+                            completion.span_id, False, record.name)
+        _prepared_records[record] = (version, prepared)
+        return prepared
     stable = event_code_for_template(record.msg) if type(record.msg) is str else None
+    if stable in _LIFECYCLE_EVENTS and record not in _owned_records:
+        stable = None
     event = stable or (DIAGNOSTIC_EVENT_CODE if record.levelno >= logging.WARNING else
                        "application_log" if record.name.startswith("app.") else "library_log")
     owner_data = _owned_records.get(record)
@@ -543,15 +567,13 @@ def _prepare_record(record):
         try:
             facts.update(project_log_attributes(dict(_execution_context_snapshot())))
         except Exception:
-            facts["details_unavailable"] = True
-    # Legacy HTTP facts are projected, never used for identity.
-    facts.update(project_log_attributes(getattr(record, "http_facts", None)))
+            facts["nkb.observation.error"] = "details_unavailable"
     snapshot = owner_data[2] if owner_data else _call("details_snapshot")
     details = _call("validate", snapshot)
     if getattr(snapshot,"details_unavailable",False):
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
     if getattr(details,"details_unavailable",False):
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
     standard = logging.LogRecord("",0,"",0,"",(),None).__dict__
     reserved = {"message", "asctime", "event", "http_facts", "trace_id", "span_id",
                 "service.name", "service.instance.id"}
@@ -564,10 +586,10 @@ def _prepare_record(record):
         projected = _call("project", log_fields=extra)
         details.update(projected)
         if getattr(projected,"details_unavailable",False):
-            facts["details_unavailable"] = True
+            facts["nkb.observation.error"] = "details_unavailable"
     message = _sanitize_content(_safe_message(record))
     if message is None and record.levelno >= logging.WARNING:
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
     if message is not None:
         message = _clip(message, _content_max_bytes)
     exception = _safe_exception(record.exc_info)
@@ -583,7 +605,7 @@ def _prepare_record(record):
         # A mutable startup policy was changed during projection. A record
         # must never combine two catalogs; only fixed facts survive this race.
         message, exception, details = None, None, {}
-        facts["details_unavailable"] = True
+        facts["nkb.observation.error"] = "details_unavailable"
         attributes = dict(facts)
     trace_id = span_id = None
     try:
@@ -598,6 +620,41 @@ def _prepare_record(record):
                         logger_name or "[logger unavailable]")
     _prepared_records[record] = (version, prepared)
     return prepared
+
+
+def _envelopes_from_flat(attributes):
+    result = {}
+    for name in detail_policy.FIELDS:
+        prefix = "nkb.content." + name
+        if type(attributes.get(prefix)) is str:
+            result[name] = {"content": attributes[prefix]}
+            for key in ("original_bytes", "truncated", "incomplete", "observed_bytes"):
+                if prefix+"_"+key in attributes:
+                    result[name][key] = attributes[prefix+"_"+key]
+    return result
+
+
+@contextmanager
+def completion_scope(attributes):
+    """Composition grants a final immutable lifecycle projection one write scope."""
+    token = _prepared_outlet.set(attributes)
+    try:
+        yield
+    finally:
+        _prepared_outlet.reset(token)
+
+
+def emit_completion_snapshot(snapshot):
+    """Log only: sole lifecycle snapshot trusted through a private side table."""
+    try:
+        logger = logging.getLogger(_OBS_LOGGER_NAME)
+        level = logging.WARNING if any(key.endswith(".outcome") and value in ("failure", "timed_out")
+                                      for key,value in snapshot.attributes.items()) else logging.INFO
+        record = logging.LogRecord(_OBS_LOGGER_NAME, level, "", 0, snapshot.event, (), None)
+        _completion_records[record] = snapshot
+        logger.handle(record)
+    except Exception:
+        pass
 
 
 def _is_empty_unknown(prepared, record):
@@ -621,13 +678,14 @@ def _safe_duration(duration_ms):
     value = float(duration_ms)
     if not math.isfinite(value) or value < 0:
         return None
-    return round(value, 3)
+    return value
 
 
 def log_http_request_completed(method, route, status, duration_ms, outcome, *,
-                               details=None, owner_context=None) -> None:
+                               details=None, owner_context=None, execution_facts=None) -> dict:
     """入站请求事实：在对应 SERVER span 仍 current 时调用一次。"""
-    facts = {}
+    facts = {"nkb.http.direction": "server", "nkb.http.summary": "HTTP completed", "nkb.http.caller": "http.request"}
+    outcome = {"completed": "success", "error": "failure", "incomplete": "unknown"}.get(outcome, outcome)
     if type(method) is str and method:
         facts["http.request.method"] = method
     if type(route) is str and route:
@@ -637,17 +695,19 @@ def log_http_request_completed(method, route, status, duration_ms, outcome, *,
         facts["http.response.status_code"] = status_value
     duration_value = _safe_duration(duration_ms)
     if duration_value is not None:
-        facts["duration_ms"] = duration_value
+        facts["nkb.http.duration_ms"] = duration_value
     if outcome in _OUTCOMES:
-        facts["outcome"] = outcome
-    _emit_facts(HTTP_COMPLETED_EVENT, facts, details=details, owner_context=owner_context)
+        facts["nkb.http.outcome"] = outcome
+    facts.update(project_log_attributes(execution_facts or {}))
+    return _emit_facts(HTTP_COMPLETED_EVENT, facts, details=details, owner_context=owner_context)
 
 
 def log_http_client_completed(method, host, port, template, status, caller,
                               duration_ms=None, outcome="completed", *,
-                              details=None, owner_context=None) -> None:
+                              details=None, owner_context=None, execution_facts=None) -> dict:
     """出站请求事实：在对应 CLIENT span 真实终态时调用一次。"""
-    facts = {}
+    facts = {"nkb.http.direction": "client", "nkb.http.summary": "HTTP completed"}
+    outcome = {"completed": "success", "error": "failure", "incomplete": "unknown"}.get(outcome, outcome)
     if type(method) is str and method:
         facts["http.request.method"] = method
     if type(host) is str and host:
@@ -663,10 +723,11 @@ def log_http_client_completed(method, host, port, template, status, caller,
         facts["nkb.http.caller"] = sanitize_text(caller)[:256]
     duration_value = _safe_duration(duration_ms)
     if duration_value is not None:
-        facts["duration_ms"] = duration_value
+        facts["nkb.http.duration_ms"] = duration_value
     if outcome in _OUTCOMES:
-        facts["outcome"] = outcome
-    _emit_facts(HTTP_CLIENT_COMPLETED_EVENT, facts, details=details, owner_context=owner_context)
+        facts["nkb.http.outcome"] = outcome
+    facts.update(project_log_attributes(execution_facts or {}))
+    return _emit_facts(HTTP_CLIENT_COMPLETED_EVENT, facts, details=details, owner_context=owner_context)
 
 
 def _emit_facts(event: str, facts: dict, *, details=None, owner_context=None) -> None:
@@ -680,16 +741,14 @@ def _emit_facts(event: str, facts: dict, *, details=None, owner_context=None) ->
             if value is not None:
                 parts.append(f"{key}={value}")
         summary = " ".join(parts)
-        _emit_owned(event + " %s", (summary,), facts=facts, details=details,
-                    owner_context=owner_context)
+        return _emit_owned(event + " %s", ("HTTP completed",), facts=facts, details=details,
+                    owner_context=owner_context, event_published=True)
     except Exception:
         return
 
 
-def _emit_owned(template, args, *, facts=None, details=None, owner_context=None, level=logging.INFO):
+def _emit_owned(template, args, *, facts=None, details=None, owner_context=None, level=logging.INFO, event_published=False):
     logger = logging.getLogger(_OBS_LOGGER_NAME)
-    if not logger.isEnabledFor(level):
-        return
     owner = owner_context if owner_context is not None else trace_api.get_current_span()
     if not isinstance(owner, trace_api.Span):
         owner = trace_api.get_current_span(owner)
@@ -697,7 +756,12 @@ def _emit_owned(template, args, *, facts=None, details=None, owner_context=None,
     # This private side table, never LogRecord.extra, establishes ownership.
     snapshot = details if details is not None else _call("details_snapshot")
     _owned_records[record] = (owner, dict(facts or {}), snapshot)
-    logger.handle(record)
+    if event_published:
+        _published_records.add(record)
+    prepared = project_record(record)
+    if logger.isEnabledFor(level):
+        logger.handle(record)
+    return dict(prepared.attributes)
 
 
 def emit_terminal_event(event, *, facts=None, details=None, owner_context=None, level=logging.INFO):
@@ -882,13 +946,14 @@ class SafeLogBridge(logging.Handler):
                 })
             except Exception:
                 self._failure_count += 1
-        self._add_event_on_current_span(record, prepared)
+        if record not in _completion_records and record not in _published_records:
+            self._add_event_on_current_span(record, prepared)
         self._forward_to_otel(record, prepared)
 
     def _add_event_on_current_span(self, record, prepared) -> None:
         template = record.msg
         event_name = event_code_for_template(template) if type(template) is str else None
-        if event_name is None:
+        if event_name is None or event_name in _LIFECYCLE_EVENTS:
             return
         try:
             span = prepared.owner

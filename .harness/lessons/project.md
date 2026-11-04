@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB依赖版本、SQLite自动埋点、入口分层守护、跨仓同名Python包解析与FastAPI路由树版本差异教训 -->
+<!-- SUMMARY: N-KB依赖版本、SQLite自动埋点、入口分层、同名包解析、FastAPI路由树及完成快照准备属性投影教训 -->
 # 项目教训
 
 AI 自主维护，人工可通过提示或建议触发新增/修正。
@@ -45,3 +45,9 @@ AI 自主维护，人工可通过提示或建议触发新增/修正。
 - 根因：相邻n-agent提交46b62dc向nagent-overview.json新增2个agent域面板（11->13），N-KB测试将自身前11面板gridPos与reference全量面板比较，长度不等恒不可满足；实际共享头部区域（前11面板）逐项仍对齐，分歧仅在reference新扩展的领域行。
 - 教训：跨仓共享栈的对比测试应显式声明契约覆盖范围（共享前缀/共享行），reference在共享区之后的领域扩展不镜像；否则相邻仓库正常演进就会打破本仓测试，且失败信息（长度差）不指向真实漂移点。
 - 来源：2026-11-02 修复debt-tracker D005；stash验证干净main复现，收窄断言至reference[:11]后6/6通过、全量756 passed。
+
+### P007: 完成快照必须跨 Span 包装器保留准备属性的同次投影
+- 现象：生命周期冻结的详情在 OTLP Log 有 original_bytes，Span Event 却丢失该元数据；单独 Application 测试通过，真实 SDK 多出口对照才复现。
+- 根因：Application 逐字段写入已脱敏内容，Infrastructure Span 包装器将各字段当作新的未准备输入再次投影，正文与长度元数据被拆散；日志桥又有独立完成事件入口，会与生命周期重复发布。
+- 教训：操作唯一拥有完成事实，日志桥只发布受信 Log；组合根注入准备属性作用域，生命周期在其中批量写入同一不可变快照的属性与 Event。必须对照真实 SDK 的 Span/Event/Log/stderr 元数据，并覆盖未采样与默认日志路径，不能只断言 Span 存在。
+- 来源：2026-11-04 规范化观测语义，真实 SDK parity RED→GREEN；修正 completion_scope 与 bridge 所有权后通过。

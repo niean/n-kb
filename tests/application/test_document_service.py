@@ -353,7 +353,7 @@ def test_upload_document_emits_upload_operation_span(service, span_exporter):
     spans = _upload_spans(span_exporter)
     assert len(spans) == 1
     span = spans[0]
-    assert span.attributes["nkb.outcome"] == "success"
+    assert span.attributes["nkb.document.outcome"] == "success"
     dumped = json.dumps(span.attributes, default=str)
     assert "secret-upload-body" not in dumped
 
@@ -378,8 +378,9 @@ def test_upload_validation_failure_span_error_type_without_content_leak(
     spans = _upload_spans(span_exporter)
     assert len(spans) == 1
     span = spans[0]
-    assert span.attributes["nkb.outcome"] == "error"
-    assert span.attributes["error.type"] == "unsupported_file_type"
+    assert span.attributes["nkb.document.outcome"] == "denied"
+    assert "error.type" not in span.attributes
+    assert span.status.status_code.name != "ERROR"
     dumped = json.dumps(span.attributes, default=str)
     assert "secret-png-bytes" not in dumped
 
@@ -401,3 +402,20 @@ def test_upload_helper_fault_does_not_change_business_result(service, monkeypatc
     document = service.upload_document(command)
 
     assert document.title == "doc.md"
+
+
+def test_upload_denial_is_only_actual_validation(service, monkeypatch):
+    from app.application import telemetry_semantics as ts
+    snapshots=[]
+    ts.configure_completion(snapshots.append)
+    try:
+        with pytest.raises(ValueError):
+            service.upload_document(UploadDocumentCommand('bad.exe', b'hello', None, None))
+        assert snapshots[-1].attributes['nkb.document.outcome']=='denied'
+        error=ValueError('unsupported_file_type')
+        monkeypatch.setattr(service._object_store,'save',lambda *a:(_ for _ in ()).throw(error))
+        with pytest.raises(ValueError) as caught:
+            service.upload_document(UploadDocumentCommand('ok.txt', b'unique', None, None))
+        assert caught.value is error
+        assert snapshots[-1].attributes['nkb.document.outcome']=='failure'
+    finally: ts.configure_completion(None)

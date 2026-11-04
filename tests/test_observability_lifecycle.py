@@ -723,7 +723,7 @@ os.environ['N_KB_TEST_API_KEY'] = 'second-catalog-sentinel'
 second = start_observability(settings)
 conflict = start_observability(Settings(otel_enabled=True,otel_exporter_otlp_endpoint='',profiling_enabled=False,otel_content_max_bytes=1024))
 if first is not second or conflict is first: print('FAIL: runtime ownership')
-if sanitizer._pending_config[1] != 2048: print('FAIL: conflicting policy replaced active')
+if sanitizer._pending_config[1] != 1024000: print('FAIL: conflicting policy replaced active')
 if first.release() != 1: print('FAIL: premature final release')
 record = logging.LogRecord('app.test',logging.INFO,'',1,'first-catalog-sentinel',(),None)
 if 'first-catalog-sentinel' in (obs.project_record(record).message or ''): print('FAIL: catalog changed')

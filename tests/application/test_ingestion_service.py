@@ -498,11 +498,11 @@ def _make_service(
 
 
 INDEX_SPAN_NAMES = {
-    "nkb.index.run",
-    "nkb.index.parse",
-    "nkb.index.split",
-    "nkb.index.embed",
-    "nkb.index.write",
+    "index.run",
+    "index.parse",
+    "index.split",
+    "index.embed",
+    "index.write",
 }
 
 
@@ -524,24 +524,24 @@ def test_index_document_wraps_run_and_four_stage_spans(span_exporter, document, 
     spans = _index_spans(span_exporter)
     names = [span.name for span in spans]
     assert set(names) == INDEX_SPAN_NAMES
-    run = next(span for span in spans if span.name == "nkb.index.run")
-    stages = [span for span in spans if span.name != "nkb.index.run"]
+    run = next(span for span in spans if span.name == "index.run")
+    stages = [span for span in spans if span.name != "index.run"]
     assert [span.name for span in stages] == [
-        "nkb.index.parse",
-        "nkb.index.split",
-        "nkb.index.embed",
-        "nkb.index.write",
+        "index.parse",
+        "index.split",
+        "index.embed",
+        "index.write",
     ]
     for span in spans:
         assert span.context.trace_id == run.context.trace_id
         if span is not run:
             assert span.parent.span_id == run.context.span_id
-            assert span.attributes["nkb.outcome"] == "success"
+            assert span.attributes["nkb.index.outcome"] == "success"
     span_ids = [span.context.span_id for span in spans]
     assert len(span_ids) == len(set(span_ids))
-    assert run.attributes["nkb.document_id"] == "doc-1"
-    assert run.attributes["nkb.chunk_count"] == 2
-    assert run.attributes["nkb.outcome"] == "success"
+    assert run.attributes["nkb.index.document_id"] == "doc-1"
+    assert run.attributes["nkb.index.chunk_count"] == 2
+    assert run.attributes["nkb.index.outcome"] == "success"
     dumped = json.dumps(
         [(span.name, span.attributes) for span in spans], default=str
     )
@@ -569,7 +569,7 @@ def test_index_document_records_index_once_while_run_current(
     outcome, kwargs = calls[0]
     assert outcome == ts.OUTCOME_SUCCESS
     assert kwargs["chunk_count"] == 2
-    assert current_names == ["nkb.index.run"]
+    assert current_names == ["index.run"]
 
 
 def test_missing_document_records_error_once_without_stage_spans(
@@ -582,11 +582,11 @@ def test_missing_document_records_error_once_without_stage_spans(
         service.index_document("doc-1")
 
     spans = _index_spans(span_exporter)
-    assert [span.name for span in spans] == ["nkb.index.run"]
+    assert [span.name for span in spans] == ["index.run"]
     run = spans[0]
-    assert run.attributes["nkb.outcome"] == "error"
+    assert run.attributes["nkb.index.outcome"] == "failure"
     assert run.attributes["error.type"] == "other"
-    assert "nkb.chunk_count" not in run.attributes
+    assert "nkb.index.chunk_count" not in run.attributes
 
 
 def test_parse_failure_marks_stage_and_run_error_without_leaking_message(
@@ -609,13 +609,13 @@ def test_parse_failure_marks_stage_and_run_error_without_leaking_message(
 
     spans = _index_spans(span_exporter)
     names = [span.name for span in spans]
-    assert "nkb.index.parse" in names
-    assert "nkb.index.split" not in names
-    parse = next(span for span in spans if span.name == "nkb.index.parse")
-    assert parse.attributes["nkb.outcome"] == "error"
+    assert "index.parse" in names
+    assert "index.split" not in names
+    parse = next(span for span in spans if span.name == "index.parse")
+    assert parse.attributes["nkb.index.outcome"] == "failure"
     assert parse.attributes["error.type"] == "other"
-    run = next(span for span in spans if span.name == "nkb.index.run")
-    assert run.attributes["nkb.outcome"] == "error"
+    run = next(span for span in spans if span.name == "index.run")
+    assert run.attributes["nkb.index.outcome"] == "failure"
     dumped = json.dumps([(span.name, span.attributes) for span in spans], default=str)
     assert "secret-parse-failure" not in dumped
     assert "private detail" not in dumped
@@ -652,11 +652,11 @@ def test_rollback_failure_counts_error_once(span_exporter, document, content):
 
     assert chunk_repository.replace_calls == 2
     spans = _index_spans(span_exporter)
-    write = next(span for span in spans if span.name == "nkb.index.write")
-    assert write.attributes["nkb.outcome"] == "error"
-    run = next(span for span in spans if span.name == "nkb.index.run")
-    assert run.attributes["nkb.outcome"] == "error"
-    assert "nkb.chunk_count" not in run.attributes
+    write = next(span for span in spans if span.name == "index.write")
+    assert write.attributes["nkb.index.outcome"] == "failure"
+    run = next(span for span in spans if span.name == "index.run")
+    assert run.attributes["nkb.index.outcome"] == "failure"
+    assert "nkb.index.chunk_count" not in run.attributes
 
 
 def test_cancelled_during_embed_propagates_and_counts_once(
@@ -688,10 +688,10 @@ def test_cancelled_during_embed_propagates_and_counts_once(
     assert len(calls) == 1
     assert calls[0][0] == ts.OUTCOME_CANCELLED
     spans = _index_spans(span_exporter)
-    embed = next(span for span in spans if span.name == "nkb.index.embed")
-    assert embed.attributes["nkb.outcome"] == "cancelled"
-    run = next(span for span in spans if span.name == "nkb.index.run")
-    assert run.attributes["nkb.outcome"] == "cancelled"
+    embed = next(span for span in spans if span.name == "index.embed")
+    assert embed.attributes["nkb.index.outcome"] == "cancelled"
+    run = next(span for span in spans if span.name == "index.run")
+    assert run.attributes["nkb.index.outcome"] == "cancelled"
     assert "error.type" not in run.attributes
     # 取消不进入既有 except Exception 失败收尾：状态停留在 INDEXING。
     assert document_repository.status_updates == [("doc-1", DocumentStatus.INDEXING)]

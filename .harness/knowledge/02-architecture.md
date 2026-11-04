@@ -41,6 +41,8 @@ N-KB 的目标是提供完整知识库产品能力：文档管理、来源管理
 
 ## 服务边界
 
+观测契约以 `app/application/telemetry_contract.py` 的标准库不可变定义为准；生命周期经 `telemetry_semantics.py` 唯一冻结完成快照并测量，组合根注入 Infrastructure 的受信日志和准备属性作用域。HTTP 复用 SERVER 并由 `telemetry_requests.py` 的请求 owner 跨线程回传业务结果；HTTP 传输、业务处理、文档/入库状态分别表达，不相互冒充。字段和出口细则见 `07-observability.md`。
+
 - N-KB 对外只承诺 HTTP API 和响应语义，不承诺内部 SQLite schema、Qdrant payload、Python 类或 LlamaIndex 配置。
 - N-Agent 调用 N-KB 时只传 query、过滤条件和调用方上下文，不直接传递内部 AgentState。
 - Qdrant 与 Ollama 是 N-KB 的基础设施依赖，可由 N-KB Docker Compose 管理，也可配置为外部服务。

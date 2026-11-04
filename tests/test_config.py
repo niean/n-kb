@@ -166,7 +166,7 @@ def test_settings_otel_and_profiling_defaults(monkeypatch: pytest.MonkeyPatch) -
     assert settings.otel_enabled is False
     assert settings.otel_exporter_otlp_endpoint == ""
     assert settings.otel_traces_sample_ratio == 1.0
-    assert settings.otel_content_max_bytes == 2048
+    assert settings.otel_content_max_bytes == 1024000
     assert settings.otel_grafana_base_url == ""
     assert settings.otel_grafana_traces_base_url == ""
     assert settings.profiling_enabled is False
@@ -228,7 +228,7 @@ def test_traces_sample_ratio_accepts_bounds(
     assert settings.otel_traces_sample_ratio == expected
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "65537", "999999"])
+@pytest.mark.parametrize("value", ["0", "-1", "1024001", "9999999"])
 def test_content_max_bytes_rejects_out_of_range(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
@@ -240,7 +240,7 @@ def test_content_max_bytes_rejects_out_of_range(
     )
 
 
-@pytest.mark.parametrize("value,expected", [("1", 1), ("2048", 2048), ("65536", 65536)])
+@pytest.mark.parametrize("value,expected", [("1", 1), ("2048", 2048), ("65536", 65536), ("1024000", 1024000)])
 def test_content_max_bytes_accepts_bounds(
     monkeypatch: pytest.MonkeyPatch, value: str, expected: int
 ) -> None:

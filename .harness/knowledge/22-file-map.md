@@ -28,7 +28,9 @@
 - 检索用例：`app/application/retrieval_service.py`，编排 query embedding、过滤、向量检索和结果转换
 - 健康检查用例：`app/application/health_service.py`，区分进程健康和依赖健康
 - 入库工作流：`app/application/ingestion_graph.py`，在需要时使用 LangGraph 表达入库状态图
-- 观测语义层：`app/application/telemetry_semantics.py`，仅依赖 opentelemetry-api；定义 semconv 常量与版本、error.type 低基数枚举、`operation_span`/`operation_context`/`safe_id`/`set_span_attribute` 等 span 与指标助手、`embedding_observer` scope 工厂，供组合根注入 Infrastructure
+- 观测固定契约：`app/application/telemetry_contract.py`，仅标准库；不可变对象、操作、结果、事件、严格属性类型、十一项内容与十三项 instrument；通用执行投影拒绝内容
+- 观测语义层：`app/application/telemetry_semantics.py`，标准库与 OTel API；管理操作生命周期、冻结完成快照、一次测量及 Span/Event/Log 发布，提供 `embedding_observer` 与受信完成回调
+- 请求归属：`app/application/telemetry_requests.py`，独立请求 owner、受信入口 channel 及同步路由线程池结果回传，退出恢复、并发隔离
 
 ## Infrastructure Layer
 
@@ -105,6 +107,8 @@
 - 观测生命周期测试：`tests/test_observability_lifecycle.py`，覆盖禁用零装配、lifespan 组装/降级/句柄释放、stdio stdout 合同与多 app 引用幂等
 - 观测基础设施测试：`tests/infrastructure/observability/`，覆盖 setup 状态机、instrumentors（含 W3C 传播与畸形 traceparent）、logging fail-closed、sanitizer、profiling 状态机
 - 观测语义层测试：`tests/application/test_telemetry_semantics.py`
+- 固定契约与请求归属测试：`tests/application/test_telemetry_contract.py`、`test_telemetry_requests.py`，覆盖严格类型、完成快照、结果分类、毫秒/秒换算、十一项详情及线程/并发隔离
+- 规范化安全出口与 HTTP 降级测试：`tests/infrastructure/observability/test_normalized_outlets.py`、`test_http_semantics.py`，覆盖真实 SDK 多出口快照一致、伪造归属、秘密隔离、真实传输终态及 SDK 失败日志
 - 观测自检 API 测试：`tests/interfaces/test_observations_api.py`，覆盖 disabled/healthy/degraded 合同、分页、并发与序列化哨兵
 
 ## Harness 任务文件
@@ -125,4 +129,5 @@
 - 有界摘要测试：`tests/infrastructure/observability/test_snapshots.py`
 - Grafana链接测试：`tests/interfaces/test_observation_links.py`
 - 共享大盘静态测试：`tests/test_grafana_dashboards.py`，从相邻n-agent检验provisioning、查询、映射与关联字段
+- 共享 Collector 测试：`tests/test_collector_semantics.py`，精确字段对照与可选 `NKB_COLLECTOR_SMOKE=1` 隔离 0.137.0 转换，原配置基线比较 N-Agent 输出，限时清理与残留检查
 - 共享栈交付：相邻n-agent `docker/observability/grafana/provisioning/dashboards/nkb-overview.json`、`nkb-logs.json`、`nkb-profile.json`及`docker/observability/nkb-metric-name-mapping.md`

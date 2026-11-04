@@ -19,12 +19,12 @@ _TOKEN_COUNTS = frozenset(("max_tokens", "input_tokens", "output_tokens", "total
 _RESTRICTED = frozenset(("tags", "sensitive_tags", "file_content", "upload_content", "document_text", "full_text", "raw", "documents", "document", "chunk_text", "vector", "vectors", "embedding", "embeddings", "sql", "statement", "parameters", "params", "db.statement", "db.query.text"))
 _MEDIA_KEYS = frozenset(("base64", "b64_json", "image_data", "audio_data"))
 _MEDIA_TYPES = frozenset(("base64", "image", "image_url", "input_image", "input_audio", "audio"))
-_config = (None, 2048, 8192)
+_config = (None, 1024000, 4096000)
 _config_version = 0
 _context = ContextVar("nkb_safe_details", default=None)
 
 
-def configure_details(sanitizer, max_bytes=2048, max_total_bytes=None):
+def configure_details(sanitizer, max_bytes=1024000, max_total_bytes=None):
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
     if max_total_bytes is None:
@@ -303,8 +303,8 @@ def validate_details(details):
     return budget_details(result, _config[2])
 
 
-def flatten_details(details, prefix="nkb.details."):
-    return {f"{prefix}{name}.{key}":value for name,item in validate_details(details).items()
+def flatten_details(details, prefix="nkb.content."):
+    return {(f"{prefix}{name}" if key == "content" else f"{prefix}{name}_{key}"):value for name,item in validate_details(details).items()
             for key,value in item.items() if value is not None}
 
 

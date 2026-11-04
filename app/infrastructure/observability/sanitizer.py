@@ -220,7 +220,7 @@ FIELDS = frozenset(("retrieval_input", "retrieval_output", "document_input",
 RECORD_TRUNCATED = "[RECORD TRUNCATED]"
 ITEMS_TRUNCATED = "[truncated]"
 _callbacks = None
-_pending_config = (None, 2048, None)
+_pending_config = (None, 1024000, None)
 
 
 def bind_details(*, configure, project, validate, flatten):
@@ -236,7 +236,7 @@ def clear_details_bindings():
     _callbacks = None
 
 
-def configure_details(sanitizer, max_bytes=2048, max_total_bytes=None):
+def configure_details(sanitizer, max_bytes=1024000, max_total_bytes=None):
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
     if max_total_bytes is not None and (type(max_total_bytes) is not int or max_total_bytes <= 0):
@@ -257,5 +257,5 @@ def validate_details(details):
     return _callbacks[2](details) if _callbacks else {}
 
 
-def flatten_details(details, prefix="nkb.details."):
+def flatten_details(details, prefix="nkb.content."):
     return _callbacks[3](details, prefix=prefix) if _callbacks else {}

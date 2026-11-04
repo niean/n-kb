@@ -31,6 +31,7 @@ def create_stdio_server(
         services.health,
         resolved_settings,
         suppress_scope=suppress_scope,
+        channel="mcp_stdio",
     )
 
 

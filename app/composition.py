@@ -131,24 +131,14 @@ def _start_profiler(handle: Any, settings: Settings) -> None:
 
 
 def register_application_log_events() -> None:
-    """登记 Application 层业务完成日志模板到 fail-closed 事件注册表（幂等）。
-
-    完成日志模板的权威来源是各业务模块常量；登记后 project_record 按事件
-    码放行正文（message 经脱敏限长），未登记记录折叠为 diagnostic_log。
-    """
+    """登记固定契约的完成事件，不再注册内部兼容日志模板。"""
     from app.infrastructure.observability.logging import register_safe_event
 
-    from app.application import ingestion_service, retrieval_service, telemetry_semantics
+    from app.application import telemetry_contract
     import logging
     logging.getLogger("app.application").setLevel(logging.INFO)
-
-    register_safe_event(telemetry_semantics.OPERATION_COMPLETED_TEMPLATE, "nkb.operation.completed")
-    register_safe_event(telemetry_semantics.STAGE_COMPLETED_TEMPLATE,"nkb.index.stage.completed")
-    register_safe_event(telemetry_semantics.EMBEDDING_COMPLETED_TEMPLATE,"nkb.embedding.completed")
-    for template in retrieval_service.RETRIEVAL_COMPLETED_TEMPLATES:
-        register_safe_event(template, retrieval_service.RETRIEVAL_COMPLETED_EVENT)
-    for template in ingestion_service.INDEX_COMPLETED_TEMPLATES:
-        register_safe_event(template, ingestion_service.INDEX_COMPLETED_EVENT)
+    for event in telemetry_contract.EVENTS:
+        register_safe_event(event, event)
 
 
 # 只读自检快照的固定信号集合（与 setup.py 的四信号一致）。
@@ -284,7 +274,7 @@ def _start_observability(settings: Settings) -> Optional[Any]:
     -> Profile 采样器。禁用时返回 None 且零观测 import（不装埋点、不挂
     handler、不启动采样器）；启用失败（冲突/降级句柄）不阻断业务启动。
     """
-    from app.application import telemetry_semantics, telemetry_details
+    from app.application import telemetry_semantics, telemetry_details, telemetry_contract
     from app.infrastructure.observability.sanitizer import bind_details
     from app.infrastructure.observability.instrumentors import (
         install_global_instrumentors,
@@ -301,35 +291,37 @@ def _start_observability(settings: Settings) -> Optional[Any]:
         projected = safe_dimensions(attributes, dimensions)
         model_key = telemetry_semantics.GEN_AI_REQUEST_MODEL
         configured_model = getattr(settings, "embedding_model", None)
-        if model_key in dimensions and attributes.get(model_key) == configured_model:
+        if (model_key in dimensions and attributes.get(model_key) == configured_model
+                and telemetry_contract.valid_attribute(model_key, configured_model)):
             projected[model_key] = configured_model
         return projected
 
+    def execution_attributes(attributes):
+        projected = telemetry_contract.project_execution_attributes(attributes)
+        model_key = telemetry_semantics.GEN_AI_REQUEST_MODEL
+        if projected.get(model_key) != getattr(settings, "embedding_model", None):
+            projected.pop(model_key, None)
+        return projected
+
     def span_attributes(attributes):
-        import math
         from app.infrastructure.observability.instrumentors import _filter_attributes
         projected = _filter_attributes({key:value for key,value in attributes.items()
-                                       if key not in ("db.statement", "db.query.text")})
-        projected.update(safe_dimensions(attributes, ("nkb.outcome", "error.type", "gen_ai.operation.name", "gen_ai.token.type")))
-        for key in ("nkb.result_count", "nkb.chunk_count", "gen_ai.usage.input_tokens",
-                    "nkb.filter.tags", "nkb.filter.source_kind", "nkb.filter.document_status", "nkb.filter.min_score"):
-            value = attributes.get(key)
-            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
-                projected[key] = value
-        model = attributes.get(telemetry_semantics.GEN_AI_REQUEST_MODEL)
-        if model == getattr(settings, "embedding_model", None) and type(model) is str:
-            projected[telemetry_semantics.GEN_AI_REQUEST_MODEL] = model
-        document_id = telemetry_semantics.safe_id(attributes.get(telemetry_semantics.NKB_DOCUMENT_ID))
-        if document_id is not None:
-            projected[telemetry_semantics.NKB_DOCUMENT_ID] = document_id
+                                       if not key.startswith("nkb.") and key not in ("db.statement", "db.query.text")})
+        projected.update(execution_attributes(attributes))
         return projected
+
+    def span_outcome(attributes, name):
+        safe = execution_attributes(attributes)
+        operation = telemetry_contract.OPERATIONS.get(name)
+        obj = operation.object if operation else ("model" if name.startswith("embeddings") else "http")
+        return safe.get(f"nkb.{obj}.outcome")
 
     active = get_runtime_handle()
     handle = setup_observability(
         settings,
         semantics=telemetry_semantics,
         semantics_keys={
-            "outcome": telemetry_semantics.NKB_OUTCOME,
+            "outcome_resolver": span_outcome,
             "error_type": telemetry_semantics.ERROR_TYPE_ATTR,
             "attribute_projector": span_attributes,
             "metric_attribute_projector": metric_attributes,
@@ -343,6 +335,11 @@ def _start_observability(settings: Settings) -> Optional[Any]:
         validate=telemetry_details.validate_details,
         flatten=telemetry_details.flatten_details,
     )
+    from app.application import telemetry_requests
+    from app.infrastructure.observability.instrumentors import configure_request_context
+    configure_request_context(scope_factory=telemetry_requests.request_scope,
+                              snapshot=telemetry_requests.current_request_facts)
+    handle.register_stop_callback(configure_request_context)
     install_global_instrumentors(settings=settings)
     # Capture one startup catalog for HTTP and stdio, never on a second app.
     import os
@@ -353,7 +350,11 @@ def _start_observability(settings: Settings) -> Optional[Any]:
     configure_execution_context(snapshot=telemetry_semantics.current_operation_context,
         project=telemetry_details.project_details, validate=telemetry_details.validate_details,
         flatten=telemetry_details.flatten_details, details_snapshot=telemetry_details.current_details,
-        budget=telemetry_details.budget_details, max_bytes=settings.otel_content_max_bytes)
+        budget=telemetry_details.budget_details, max_bytes=settings.otel_content_max_bytes,
+        execution_project=execution_attributes)
+    from app.infrastructure.observability.logging import emit_completion_snapshot, completion_scope
+    telemetry_semantics.configure_completion(emit_completion_snapshot, scope_factory=completion_scope)
+    handle.register_stop_callback(lambda: telemetry_semantics.configure_completion())
     register_application_log_events()
     attach_observability_log_handlers(bridge=handle.log_bridge)
     _start_profiler(handle, settings)

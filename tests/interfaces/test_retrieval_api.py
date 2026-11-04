@@ -248,8 +248,8 @@ def test_search_api_emits_server_retrieval_embed_httpx_span_tree(otel_capture):
     assert retrieval.context.trace_id == server.context.trace_id
     assert retrieval.parent.span_id == server.context.span_id
     assert retrieval.attributes[ts.NKB_RESULT_COUNT] == 1
-    assert retrieval.attributes["nkb.filter.tags"] == 1
-    assert retrieval.attributes[ts.NKB_OUTCOME] == ts.OUTCOME_SUCCESS
+    assert retrieval.attributes["nkb.retrieval.filter_tags"] == 1
+    assert retrieval.attributes["nkb.retrieval.outcome"] == ts.OUTCOME_SUCCESS
 
     embeddings = [
         s

@@ -1,265 +1,157 @@
-"""N-KB telemetry semantics registry -- Application layer.
+"""Operation lifecycle: stdlib and OTel API only; SDK assembly is injected."""
 
-集中定义 N-KB 观测语义映射、属性白名单、instrument 名称与薄 helpers。
-本模块只依赖标准库与 ``opentelemetry-api``；禁止 import SDK、exporter、
-instrumentation、app.domain、app.config 或 app.infrastructure（架构边界测试
-与 T7 组合根共同守护：Infrastructure 通过组合根注入拿到投影策略，不反向
-import 本模块）。
-
-Pinned semconv version: SEMCONV_VERSION =
-"semantic-conventions-genai main @ 2026-10-24 (Development)"。GenAI 约定处于
-Development 状态；草案破坏性变更时在本文件集中重映射，业务调用点不改动。
-
-约定规则（对齐 spec-261029 Components 2）：
-- GenAI 优先：embedding 调用只使用 GenAI embeddings 约定
-  （``gen_ai.operation.name=embeddings``、``gen_ai.request.model``、
-  ``gen_ai.usage.input_tokens``）；``nkb.*`` 仅补充 GenAI 未覆盖的 RAG 信号，
-  同一信号只有一个约定名。
-- 错误只输出安全 ``error.type`` 低基数枚举（unsupported_file_type /
-  file_too_large / embedding_failed / vector_index_failed / sqlite_failed /
-  other）。``embedding_provider_failed`` 与 ``embedding_vector_mismatch`` 映射
-  ``embedding_failed``；其它已知业务稳定码映射对应枚举或 ``other``。原始异常
-  message/stacktrace 永不进入 span 属性、事件或 metric 维度。cancelled 是
-  outcome 而非错误：取消不扩充错误枚举（不写 ``error.type``，也不伪造
-  ``CancelledError`` 类名）。
-- 指标维度只允许有限枚举（operation、配置模型、stage、outcome、error.type）；
-  document/job/trace/span ID、query、标签值、来源与原始 URL 不进入 metrics。
-- 全部观测动作（span 创建、属性写入、metric 记录）失败即静默隔离，
-  不改变业务返回值或异常传播路径。
-"""
 from __future__ import annotations
-
 import asyncio
-import logging
 import contextvars
-import re
+import logging
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Iterator, Mapping, Optional
-
-from . import telemetry_details
-from .telemetry_payloads import embedding_input
-
+from typing import Mapping, Optional
 from opentelemetry import metrics, trace
 from opentelemetry.trace import INVALID_SPAN_CONTEXT, SpanKind, Status, StatusCode
+from . import telemetry_contract as contract, telemetry_details
+from .telemetry_contract import (
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_TOKEN_TYPE,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_PROVIDER_NAME,
+    ERROR_TYPE_ATTR,
+    OUTCOMES,
+    ERROR_TYPES,
+    OBJECTS,
+    INDEX_STAGES,
+    OPERATIONS,
+    IDENTITY_ATTRIBUTES,
+    INSTRUMENTS,
+    INSTRUMENT_OPERATION_DURATION,
+    INSTRUMENT_TOKEN_USAGE,
+    INSTRUMENT_INDEX_JOBS,
+    INSTRUMENT_INDEX_CHUNKS,
+    INSTRUMENT_RETRIEVAL_REQUESTS,
+    INSTRUMENT_RETRIEVAL_RESULTS,
+    INSTRUMENT_RETRIEVAL_DURATION,
+    TOKEN_HISTOGRAM_BOUNDARIES,
+    GENAI_DURATION_BOUNDARIES,
+    NKB_DURATION_BOUNDARIES,
+    CHUNK_HISTOGRAM_BOUNDARIES,
+    RESULT_HISTOGRAM_BOUNDARIES,
+    safe_id,
+)
+from .telemetry_payloads import embedding_input
 
 SEMCONV_VERSION = "semantic-conventions-genai main @ 2026-10-24 (Development)"
-
 DEFAULT_SERVICE = "n-kb"
-
-_TRACER_NAME = f"{DEFAULT_SERVICE}.application.telemetry_semantics"
+_TRACER_NAME = "n-kb.application.telemetry_semantics"
 _METER_NAME = _TRACER_NAME
-
-_MAX_NAME_LENGTH = 64
-_MAX_ID_LENGTH = 128
-_ID_PATTERN = re.compile(r"[\w.:/-]+")
-_MODEL_PATTERN = re.compile(r"[\w.:/@_-]+")
-
-# ---------------------------------------------------------------------------
-# GenAI attribute constants (pinned to the draft above)
-# ---------------------------------------------------------------------------
-
-GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
-GEN_AI_TOKEN_TYPE = "gen_ai.token.type"
-GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-
-ERROR_TYPE_ATTR = "error.type"
-
 EMBEDDINGS_OPERATION = "embeddings"
 TOKEN_TYPE_INPUT = "input"
-
-# ---------------------------------------------------------------------------
-# nkb.* supplement attributes (GenAI-uncovered RAG signals only)
-# ---------------------------------------------------------------------------
-
-NKB_RESULT_COUNT = "nkb.result_count"
-NKB_CHUNK_COUNT = "nkb.chunk_count"
-NKB_DOCUMENT_ID = "nkb.document_id"
-NKB_OUTCOME = "nkb.outcome"
-NKB_FILTER_PREFIX = "nkb.filter."
-
-# ---------------------------------------------------------------------------
-# Outcomes
-# ---------------------------------------------------------------------------
-
 OUTCOME_SUCCESS = "success"
-OUTCOME_ERROR = "error"
+OUTCOME_FAILURE = OUTCOME_ERROR = "failure"
 OUTCOME_CANCELLED = "cancelled"
-OUTCOME_OTHER = "other"
-OUTCOMES = frozenset({OUTCOME_SUCCESS, OUTCOME_ERROR, OUTCOME_CANCELLED, OUTCOME_OTHER})
-
-# ---------------------------------------------------------------------------
-# Safe error.type enum (strict spec set; cancelled is an outcome, not here)
-# ---------------------------------------------------------------------------
-
+OUTCOME_DENIED = "denied"
+OUTCOME_TIMED_OUT = "timed_out"
+OUTCOME_SKIPPED = "skipped"
+OUTCOME_DEFERRED = "deferred"
+OUTCOME_UNKNOWN = OUTCOME_OTHER = "unknown"
 ERROR_UNSUPPORTED_FILE_TYPE = "unsupported_file_type"
 ERROR_FILE_TOO_LARGE = "file_too_large"
 ERROR_EMBEDDING_FAILED = "embedding_failed"
 ERROR_VECTOR_INDEX_FAILED = "vector_index_failed"
 ERROR_SQLITE_FAILED = "sqlite_failed"
 ERROR_OTHER = "other"
-
-ERROR_TYPES = frozenset(
+NKB_RESULT_COUNT = "nkb.retrieval.result_count"
+NKB_CHUNK_COUNT = "nkb.index.chunk_count"
+NKB_DOCUMENT_ID = "nkb.index.document_id"
+NKB_FILTER_PREFIX = "nkb.retrieval.filter_"
+# Deprecated symbol only; no publisher writes this removed attribute.
+NKB_OUTCOME = "nkb.outcome"
+RETRIEVAL_SPAN_NAME = "retrieval.search"
+INDEX_RUN_SPAN_NAME = "index.run"
+INDEX_STAGE_SPAN_PREFIX = "index."
+_STABLE_CODE_TO_ERROR_TYPE = MappingProxyType(
     {
-        ERROR_UNSUPPORTED_FILE_TYPE,
-        ERROR_FILE_TOO_LARGE,
-        ERROR_EMBEDDING_FAILED,
-        ERROR_VECTOR_INDEX_FAILED,
-        ERROR_SQLITE_FAILED,
-        ERROR_OTHER,
-    }
-)
-
-# Existing stable business codes -> spec error.type enum. Exact-match keys
-# only (P058: no prefix/pattern matching, so raw exception text can never
-# ride along); anything unknown collapses to ``other``.
-_STABLE_CODE_TO_ERROR_TYPE: Mapping[str, str] = MappingProxyType(
-    {
-        "unsupported_file_type": ERROR_UNSUPPORTED_FILE_TYPE,
-        "file_too_large": ERROR_FILE_TOO_LARGE,
-        "embedding_provider_failed": ERROR_EMBEDDING_FAILED,
-        "embedding_vector_mismatch": ERROR_EMBEDDING_FAILED,
-        "qdrant_client_not_installed": ERROR_VECTOR_INDEX_FAILED,
-        "document_not_found": ERROR_OTHER,
-        "index_job_not_found": ERROR_OTHER,
-        "invalid_tags": ERROR_OTHER,
-        "invalid_storage_path": ERROR_OTHER,
-        "infrastructure_error": ERROR_OTHER,
-        "validation_error": ERROR_OTHER,
+        "embedding_provider_failed": "embedding_failed",
+        "embedding_vector_mismatch": "embedding_failed",
+        "qdrant_client_not_installed": "vector_index_failed",
     }
 )
 
 
-def map_error_type(value: object) -> str:
-    """Map a stable code / raw string through the bounded error-type enum."""
-    if isinstance(value, str):
-        if value in ERROR_TYPES:
-            return value
-        mapped = _STABLE_CODE_TO_ERROR_TYPE.get(value)
-        if mapped is not None:
-            return mapped
-    return ERROR_OTHER
+def map_error_type(value):
+    return (
+        value
+        if type(value) is str and value in ERROR_TYPES
+        else (
+            _STABLE_CODE_TO_ERROR_TYPE.get(value, "other")
+            if type(value) is str
+            else "other"
+        )
+    )
 
 
-def outcome_for_exception(exc: Optional[BaseException]) -> str:
-    """Business-terminal outcome for an escaped exception."""
+def _is_timeout(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, TimeoutError):
+            return True
+        if any(
+            cls.__module__ in ("httpx", "httpx._exceptions")
+            and cls.__name__
+            in (
+                "TimeoutException",
+                "ConnectTimeout",
+                "ReadTimeout",
+                "WriteTimeout",
+                "PoolTimeout",
+            )
+            for cls in type(exc).__mro__
+        ):
+            return True
+        exc = exc.__cause__
+    return False
+
+
+def outcome_for_exception(exc):
     if exc is None:
         return OUTCOME_SUCCESS
-    if isinstance(exc, asyncio.CancelledError):
+    if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return OUTCOME_CANCELLED
-    return OUTCOME_ERROR
+    return OUTCOME_TIMED_OUT if _is_timeout(exc) else OUTCOME_FAILURE
 
 
-def error_type_for_exception(exc: Optional[BaseException]) -> Optional[str]:
-    """Safe ``error.type`` for an exception, or ``None`` when cancelled.
-
-    ``str(exc)`` is used strictly as an exact-match lookup key against the
-    known stable codes (this codebase raises ``ValueError("document_not_found")``
-    style exceptions); the text itself is never emitted.
-    """
-    if exc is None:
+def error_type_for_exception(exc):
+    outcome = outcome_for_exception(exc)
+    if exc is None or outcome == OUTCOME_CANCELLED:
         return None
-    if isinstance(exc, asyncio.CancelledError):
-        return None
+    if outcome == OUTCOME_TIMED_OUT:
+        return "timeout"
     if isinstance(exc, sqlite3.Error):
         return ERROR_SQLITE_FAILED
-    return map_error_type(str(exc))
+    try:
+        code = str(exc)
+    except Exception:
+        return ERROR_OTHER
+    return map_error_type(code)
 
 
-def map_outcome(outcome: object) -> str:
-    if isinstance(outcome, str) and outcome in OUTCOMES:
-        return outcome
-    return OUTCOME_OTHER
+def map_outcome(value):
+    return value if type(value) is str and value in OUTCOMES else OUTCOME_UNKNOWN
 
 
-def map_model_name(model: object) -> str:
-    """Bounded model mapping: models come only from configuration."""
-    if not isinstance(model, str):
+def map_model_name(value):
+    if type(value) is not str:
         return "other"
-    cleaned = model.strip()
-    if not cleaned or len(cleaned) > _MAX_NAME_LENGTH:
-        return "other"
-    return cleaned if _MODEL_PATTERN.fullmatch(cleaned) else "other"
+    value = value.strip()
+    return value if contract.valid_attribute(GEN_AI_REQUEST_MODEL, value) else "other"
 
 
-def _safe_id(value: object) -> Optional[str]:
-    if isinstance(value, str) and 0 < len(value) <= _MAX_ID_LENGTH:
-        return value if _ID_PATTERN.fullmatch(value) else None
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Instruments (spec metric table, item by item)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _InstrumentSpec:
-    kind: str  # "counter" | "histogram"
-    unit: str
-    boundaries: tuple = ()
-    allowed_dimensions: tuple = ()
-
-
-INSTRUMENT_OPERATION_DURATION = "gen_ai.client.operation.duration"  # Histogram/s
-INSTRUMENT_TOKEN_USAGE = "gen_ai.client.token.usage"  # Histogram/{token}
-INSTRUMENT_INDEX_JOBS = "nkb.index.jobs"  # Counter
-INSTRUMENT_INDEX_CHUNKS = "nkb.index.chunks"  # Histogram
-INSTRUMENT_RETRIEVAL_REQUESTS = "nkb.retrieval.requests"  # Counter
-INSTRUMENT_RETRIEVAL_RESULTS = "nkb.retrieval.results"  # Histogram
-INSTRUMENT_RETRIEVAL_DURATION = "nkb.retrieval.duration"  # Histogram/s
-
-TOKEN_HISTOGRAM_BOUNDARIES = (
-    1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144,
-    1048576, 4194304, 16777216, 67108864,
-)
-GENAI_DURATION_BOUNDARIES = (
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75,
-    1.0, 2.5, 5.0, 7.5, 10.0, 30.0,
-)
-NKB_DURATION_BOUNDARIES = (
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-)
-CHUNK_HISTOGRAM_BOUNDARIES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
-RESULT_HISTOGRAM_BOUNDARIES = (0, 1, 2, 3, 5, 8, 10, 20, 50, 100)
-
-INSTRUMENTS: Mapping[str, _InstrumentSpec] = MappingProxyType(
-    {
-        INSTRUMENT_OPERATION_DURATION: _InstrumentSpec(
-            "histogram", "s", GENAI_DURATION_BOUNDARIES, (GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, ERROR_TYPE_ATTR)
-        ),
-        INSTRUMENT_TOKEN_USAGE: _InstrumentSpec(
-            "histogram", "{token}", TOKEN_HISTOGRAM_BOUNDARIES, (GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_TOKEN_TYPE)
-        ),
-        "nkb.document.uploads": _InstrumentSpec("counter", "1", allowed_dimensions=("outcome",)),
-        "nkb.document.upload.duration": _InstrumentSpec("histogram", "s", NKB_DURATION_BOUNDARIES, ("outcome",)),
-        "nkb.index.duration": _InstrumentSpec("histogram", "s", NKB_DURATION_BOUNDARIES, ("outcome",)),
-        "nkb.index.stage.duration": _InstrumentSpec("histogram", "s", NKB_DURATION_BOUNDARIES, ("stage", "outcome")),
-        "nkb.mcp.requests": _InstrumentSpec("counter", "1", allowed_dimensions=("operation", "outcome")),
-        "nkb.mcp.duration": _InstrumentSpec("histogram", "s", NKB_DURATION_BOUNDARIES, ("operation", "outcome")),
-        INSTRUMENT_INDEX_JOBS: _InstrumentSpec("counter", "1", allowed_dimensions=("outcome",)),
-        INSTRUMENT_INDEX_CHUNKS: _InstrumentSpec(
-            "histogram", "{chunk}", CHUNK_HISTOGRAM_BOUNDARIES
-        ),
-        INSTRUMENT_RETRIEVAL_REQUESTS: _InstrumentSpec("counter", "1", allowed_dimensions=("outcome",)),
-        INSTRUMENT_RETRIEVAL_RESULTS: _InstrumentSpec(
-            "histogram", "{result}", RESULT_HISTOGRAM_BOUNDARIES
-        ),
-        INSTRUMENT_RETRIEVAL_DURATION: _InstrumentSpec(
-            "histogram", "s", NKB_DURATION_BOUNDARIES, ("outcome",)
-        ),
-    }
-)
-
-
-# ---------------------------------------------------------------------------
-# Tracer / meter accessors and instrument handles
-# ---------------------------------------------------------------------------
+_safe_id = safe_id
 
 
 def _get_tracer():
@@ -287,7 +179,9 @@ def _get_instrument(name: str):
         try:
             # Pinned opentelemetry-api 1.45.1 kwarg name.
             handle = meter.create_histogram(
-                name, unit=spec.unit, explicit_bucket_boundaries_advisory=spec.boundaries
+                name,
+                unit=spec.unit,
+                explicit_bucket_boundaries_advisory=spec.boundaries,
             )
         except TypeError:  # older OTel API without the advisory kwarg
             handle = meter.create_histogram(name, unit=spec.unit)
@@ -373,206 +267,390 @@ def _span_scope(span):
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Operation context (ContextVar): 传播执行现场；进入子操作更新、退出恢复；
-# 并发请求不串号。token 在 finally reset，覆盖嵌套、异常与取消。
-# ---------------------------------------------------------------------------
-
-_operation_var: contextvars.ContextVar[Optional[Mapping[str, str]]] = contextvars.ContextVar(
-    "nkb_operation_context", default=None
-)
+_operation_var = contextvars.ContextVar("nkb_operation_context", default=None)
+_active_operation = contextvars.ContextVar("nkb_active_operation", default=None)
+_completion_callback = None
+_completion_scope_factory = None
 
 
-def current_operation_context() -> Mapping[str, str]:
-    context = _operation_var.get()
-    return context if context is not None else MappingProxyType({})
+@dataclass(frozen=True)
+class CompletionSnapshot:
+    """Sole completion publication. Callback must not add events or metrics.
+
+    attributes is the identical immutable safe projection used by Span/Event/Log.
+    Native IDs are absent for an invalid SpanContext. Details are already sanitized
+    and bounded as flat nkb.content fields, and must not be re-expanded from extras.
+    """
+
+    event: str
+    attributes: Mapping
+    trace_id: Optional[str] = None
+    span_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _OperationState:
+    name: str
+    span: object
+    attributes: Mapping
+    outcome: Optional[str] = None
+
+
+def configure_completion(callback=None, scope_factory=None):
+    """Inject one safe log publisher; None restores the marked stdlib log path."""
+    if callback is not None and not callable(callback):
+        raise ValueError("completion callback must be callable or None")
+    if scope_factory is not None and not callable(scope_factory):
+        raise ValueError("completion scope must be callable or None")
+    global _completion_callback, _completion_scope_factory
+    _completion_callback = callback
+    _completion_scope_factory = scope_factory
 
 
 @contextmanager
-def operation_context(**facts) -> Iterator[Mapping[str, str]]:
-    parent = _operation_var.get() or {}
+def _completion_scope(attributes):
+    scope = None
+    if _completion_scope_factory is not None:
+        try:
+            scope = _completion_scope_factory(attributes)
+            scope.__enter__()
+        except Exception:
+            scope = None
+    try:
+        yield
+    finally:
+        if scope is not None:
+            try:
+                scope.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def current_operation_context():
+    return _operation_var.get() or MappingProxyType({})
+
+
+@contextmanager
+def operation_context(**facts):
+    parent = current_operation_context()
+    inherited = {
+        key: value for key, value in parent.items() if key in IDENTITY_ATTRIBUTES
+    }
     merged = MappingProxyType(
-        {**parent, **{key: value for key, value in facts.items() if value is not None}}
+        {**inherited, **contract.project_execution_attributes(facts)}
     )
     token = _operation_var.set(merged)
     try:
         yield merged
     finally:
+        _operation_var.reset(token)
+
+
+def _submit(**attributes):
+    state = _active_operation.get()
+    if state is None:
+        return
+    safe = contract.project_execution_attributes(attributes)
+    merged = MappingProxyType({**state.attributes, **safe})
+    _active_operation.set(
+        _OperationState(state.name, state.span, merged, state.outcome)
+    )
+    for key, value in safe.items():
+        _set_attr(state.span, key, value)
+    _operation_var.set(MappingProxyType({**current_operation_context(), **safe}))
+
+
+def set_operation_result(outcome):
+    """Report a factual terminal result; metrics/logs remain lifecycle-owned."""
+    state = _active_operation.get()
+    if state is not None:
+        _active_operation.set(
+            _OperationState(
+                state.name, state.span, state.attributes, map_outcome(outcome)
+            )
+        )
+
+
+def set_span_attribute(span, key, value):
+    if key in contract.CONTENT_ATTRIBUTES or not contract.valid_attribute(key, value):
+        return
+    state = _active_operation.get()
+    if state is not None and state.span is span:
+        _submit(**{key: value})
+    else:
+        _set_attr(span, key, value)
+
+
+def set_index_chunk_count(span, chunk_count):
+    set_span_attribute(span, NKB_CHUNK_COUNT, chunk_count)
+
+
+def _publish_completion(snapshot):
+    if _completion_callback is not None:
+        _completion_callback(snapshot)
+        return
+    # The bridge must use the marked snapshot and never add another Event.
+    level = (
+        logging.WARNING
+        if any(
+            snapshot.attributes.get(f"nkb.{obj}.outcome") in ("failure", "timed_out")
+            for obj in OBJECTS
+        )
+        else logging.INFO
+    )
+    logging.getLogger(__name__).log(
+        level,
+        snapshot.event,
+        extra={"nkb_completion_snapshot": snapshot, "nkb_completion_owned": True},
+    )
+
+
+def _measure_completion(spec, attrs, seconds):
+    obj, action = spec.object, spec.action
+    outcome = attrs[f"nkb.{obj}.outcome"]
+    dims = {f"nkb.{obj}.outcome": outcome}
+    if obj == "model":
+        dimensions = {
+            GEN_AI_OPERATION_NAME: EMBEDDINGS_OPERATION,
+            GEN_AI_REQUEST_MODEL: attrs[GEN_AI_REQUEST_MODEL],
+        }
+        if ERROR_TYPE_ATTR in attrs:
+            dimensions[ERROR_TYPE_ATTR] = attrs[ERROR_TYPE_ATTR]
+        _histogram_record(INSTRUMENT_OPERATION_DURATION, seconds, dimensions)
+        if GEN_AI_USAGE_INPUT_TOKENS in attrs:
+            _histogram_record(
+                INSTRUMENT_TOKEN_USAGE,
+                attrs[GEN_AI_USAGE_INPUT_TOKENS],
+                {
+                    GEN_AI_OPERATION_NAME: EMBEDDINGS_OPERATION,
+                    GEN_AI_REQUEST_MODEL: attrs[GEN_AI_REQUEST_MODEL],
+                    GEN_AI_TOKEN_TYPE: TOKEN_TYPE_INPUT,
+                },
+            )
+    elif obj == "index" and action in INDEX_STAGES:
+        _histogram_record(
+            "nkb.index.stage.duration", seconds, {**dims, "nkb.index.stage": action}
+        )
+    elif obj in ("document", "index", "retrieval", "mcp"):
+        counter = {
+            "document": "nkb.document.uploads",
+            "index": "nkb.index.jobs",
+            "retrieval": "nkb.retrieval.requests",
+            "mcp": "nkb.mcp.requests",
+        }[obj]
+        duration = {
+            "document": "nkb.document.upload.duration",
+            "index": "nkb.index.duration",
+            "retrieval": "nkb.retrieval.duration",
+            "mcp": "nkb.mcp.duration",
+        }[obj]
+        if obj == "mcp":
+            dims["nkb.mcp.operation"] = action
+        _counter_add(counter, 1, dims)
+        _histogram_record(duration, seconds, dims)
+        if outcome == OUTCOME_SUCCESS:
+            key = {"index": NKB_CHUNK_COUNT, "retrieval": NKB_RESULT_COUNT}.get(obj)
+            if key is not None and key in attrs:
+                _histogram_record(
+                    (
+                        INSTRUMENT_INDEX_CHUNKS
+                        if obj == "index"
+                        else INSTRUMENT_RETRIEVAL_RESULTS
+                    ),
+                    attrs[key],
+                    {},
+                )
+
+
+def _finish_operation(spec, span, started, exc):
+    state = _active_operation.get()
+    outcome = (
+        outcome_for_exception(exc)
+        if exc is not None
+        else state.outcome or OUTCOME_SUCCESS
+    )
+    # Only explicitly reported actual validation admission failures are denials.
+    if (
+        state.outcome == OUTCOME_DENIED
+        and exc is not None
+        and outcome == OUTCOME_FAILURE
+    ):
+        outcome = OUTCOME_DENIED
+    elapsed = max(0.0, time.monotonic() - started)
+    attrs = dict(state.attributes)
+    attrs.update(
+        {
+            f"nkb.{spec.object}.outcome": outcome,
+            f"nkb.{spec.object}.summary": spec.summary,
+            f"nkb.{spec.object}.duration_ms": elapsed * 1000,
+        }
+    )
+    if spec.object == "model":
+        attrs["nkb.model.usage_known"] = GEN_AI_USAGE_INPUT_TOKENS in attrs
+    if outcome in (OUTCOME_FAILURE, OUTCOME_TIMED_OUT):
         try:
-            _operation_var.reset(token)
-        except ValueError:  # token belonged to a different context
+            span.set_status(Status(StatusCode.ERROR))
+        except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# Span helpers
-# ---------------------------------------------------------------------------
-
-RETRIEVAL_SPAN_NAME = "nkb.retrieval.search"
-INDEX_RUN_SPAN_NAME = "nkb.index.run"
-INDEX_STAGE_SPAN_PREFIX = "nkb.index."
-INDEX_STAGES = ("parse", "split", "embed", "write")
-
-
-def index_stage_span_name(stage: object) -> str:
-    if isinstance(stage, str) and stage in INDEX_STAGES:
-        return INDEX_STAGE_SPAN_PREFIX + stage
-    return INDEX_STAGE_SPAN_PREFIX + "other"
-
-
-def _safe_stage(stage: object) -> str:
-    if isinstance(stage, str) and stage in INDEX_STAGES:
-        return stage
-    return "other"
+    if exc is not None:
+        error = error_type_for_exception(exc)
+        if outcome in (OUTCOME_FAILURE, OUTCOME_TIMED_OUT):
+            if error is not None:
+                attrs[ERROR_TYPE_ATTR] = error
+        try:
+            telemetry_details.update_current_details(
+                error={"outcome": outcome, "type": error}
+            )
+        except Exception:
+            attrs["nkb.observation.error"] = "details_unavailable"
+    try:
+        attrs.update(
+            telemetry_details.flatten_details(telemetry_details.current_details())
+        )
+    except Exception:
+        attrs["nkb.observation.error"] = "details_unavailable"
+    attrs = MappingProxyType(contract.project_attributes(attrs))
+    trace_id = span_id = None
+    try:
+        ctx = span.get_span_context()
+        if ctx.is_valid:
+            trace_id = f"{ctx.trace_id:032x}"
+            span_id = f"{ctx.span_id:016x}"
+    except Exception:
+        pass
+    snapshot = CompletionSnapshot(spec.event, attrs, trace_id, span_id)
+    _operation_var.set(attrs)
+    try:
+        _measure_completion(spec, attrs, elapsed)
+    except Exception:
+        pass
+    with _completion_scope(snapshot.attributes):
+        try:
+            span.set_attributes(snapshot.attributes)
+        except Exception:
+            pass
+        try:
+            span.add_event(snapshot.event, attributes=snapshot.attributes)
+        except Exception:
+            pass
+    try:
+        _publish_completion(snapshot)
+    except Exception:
+        pass
 
 
 @contextmanager
-def _operation_span(
-    name: str,
-    kind: SpanKind,
-    attrs: tuple = (),
-    facts: Optional[Mapping[str, str]] = None,
-) -> Iterator[object]:
-    """Operation span lifecycle shared by all nkb.* helpers.
-
-    Span creation/attr/status/end failures are isolated; business exceptions
-    and CancelledError propagate as-is. Outcome and safe error.type are
-    written while the span is still current (P062: metrics recorded inside
-    the same scope keep exemplar linkage available).
-    """
+def _operation_span(name, kind=SpanKind.INTERNAL, attrs=(), facts=None):
+    # Internal compatibility accepts legacy callsite names; exports are canonical.
+    name = name.removeprefix("nkb.") if type(name) is str else ""
+    spec = OPERATIONS.get(name)
+    if spec is None:
+        token = _active_operation.set(None)
+        try:
+            with (
+                operation_context(**{"nkb.observation.error": "unknown_operation"}),
+                telemetry_details.detail_scope(),
+            ):
+                try:
+                    logging.getLogger(__name__).warning("unknown telemetry operation")
+                except Exception:
+                    pass
+                yield _NoopSpan()
+        finally:
+            _active_operation.reset(token)
+        return
+    inherited = {
+        key: value
+        for key, value in current_operation_context().items()
+        if key in IDENTITY_ATTRIBUTES
+    }
+    initial = contract.project_execution_attributes(
+        {**inherited, **dict(attrs), **(facts or {})}
+    )
+    # Caller cannot prewrite result facts, summaries, durations or content.
+    initial = {
+        key: value
+        for key, value in initial.items()
+        if key in IDENTITY_ATTRIBUTES
+        or key
+        in (
+            "nkb.index.stage",
+            GEN_AI_OPERATION_NAME,
+            GEN_AI_REQUEST_MODEL,
+            GEN_AI_PROVIDER_NAME,
+        )
+    }
+    if spec.object != "model":
+        initial[f"nkb.{spec.object}.operation"] = spec.action
     started = time.monotonic()
-    span = _start_span(name, kind)
-    for key, value in attrs:
-        if value is not None:
-            _set_attr(span, key, value)
-    exc: Optional[BaseException] = None
-    outcome = OUTCOME_SUCCESS
+    span = _start_span(
+        (
+            f'embeddings {initial.get(GEN_AI_REQUEST_MODEL,"other")}'
+            if spec.object == "model"
+            else name
+        ),
+        kind,
+    )
+    for key, value in initial.items():
+        _set_attr(span, key, value)
+    token = _active_operation.set(
+        _OperationState(name, span, MappingProxyType(initial))
+    )
     try:
-        with _span_scope(span), operation_context(**{"operation": name, **(facts or {})}), telemetry_details.detail_scope():
+        with (
+            _span_scope(span),
+            operation_context(**initial),
+            telemetry_details.detail_scope(),
+        ):
+            exc = None
             try:
                 yield span
             except BaseException as caught:
                 exc = caught
-                outcome = outcome_for_exception(caught)
                 raise
             finally:
-                if exc is not None and not isinstance(exc, asyncio.CancelledError):
-                    try:
-                        span.set_status(Status(StatusCode.ERROR))
-                    except Exception:
-                        pass
-                    _set_attr(span, ERROR_TYPE_ATTR, error_type_for_exception(exc))
-                if exc is not None:
-                    telemetry_details.update_current_details(error={"outcome":outcome,"type":error_type_for_exception(exc)})
-                _set_attr(span, NKB_OUTCOME, outcome)
-                _record_operation_terminal(name, outcome, time.monotonic() - started)
+                try:
+                    _finish_operation(spec, span, started, exc)
+                except Exception:
+                    pass
     finally:
+        _active_operation.reset(token)
         _end_span(span)
 
 
-@contextmanager
-def retrieval_span() -> Iterator[object]:
-    """`nkb.retrieval.search` INTERNAL span（结果数、过滤条件类型与数量）。
-
-    ``retrieval_attrs`` 提供投影属性；``record_retrieval`` 须在本 span 仍为
-    current 时调用（jobs/requests 每业务终态一次）。
-    """
-    with _operation_span(RETRIEVAL_SPAN_NAME, SpanKind.INTERNAL) as span:
-        yield span
+operation_span = _operation_span
+completed_operation = operation_span
 
 
-@contextmanager
-def index_run_span(document_id: Optional[str] = None) -> Iterator[object]:
-    """`nkb.index.run` INTERNAL span（document_id、chunk 数、阶段结果）。"""
-    attrs = ((NKB_DOCUMENT_ID, _safe_id(document_id) if document_id else None),)
-    with _operation_span(
-        INDEX_RUN_SPAN_NAME, SpanKind.INTERNAL, attrs=attrs
-    ) as span:
-        yield span
+def retrieval_span():
+    return _operation_span(RETRIEVAL_SPAN_NAME)
 
 
-@contextmanager
-def index_stage_span(stage: str) -> Iterator[object]:
-    """`nkb.index.{parse|split|embed|write}` INTERNAL 阶段 span（含 outcome）。"""
-    with _operation_span(
-        index_stage_span_name(stage),
-        SpanKind.INTERNAL,
-        facts={"stage": _safe_stage(stage)},
-    ) as span:
-        yield span
+def index_run_span(document_id=None):
+    return _operation_span(
+        INDEX_RUN_SPAN_NAME, attrs=((NKB_DOCUMENT_ID, safe_id(document_id)),)
+    )
 
 
-def set_index_chunk_count(span, chunk_count) -> None:
-    """Write the successful chunk count onto an index run span."""
-    try:
-        count = max(0, int(chunk_count))
-    except Exception:
-        return
-    _set_attr(span, NKB_CHUNK_COUNT, count)
+def index_stage_span_name(stage):
+    return INDEX_STAGE_SPAN_PREFIX + stage if stage in INDEX_STAGES else "unknown"
 
 
-def safe_id(value: object) -> Optional[str]:
-    """Bounded id projection（与操作 span 属性同一投影；无效返回 None）。"""
-    return _safe_id(value)
+def index_stage_span(stage):
+    return _operation_span(
+        index_stage_span_name(stage), facts={"nkb.index.stage": stage}
+    )
 
 
-def set_span_attribute(span, key: str, value) -> None:
-    """安全写入单个 span 属性（失败静默隔离）。"""
-    _set_attr(span, key, value)
-
-
-@contextmanager
-def operation_span(
-    name: str,
-    kind: SpanKind = SpanKind.INTERNAL,
-    attrs=(),
-    facts: Optional[Mapping[str, str]] = None,
-) -> Iterator[object]:
-    """公共操作 span（本模块专用 helper 之外的 nkb.* 操作使用，如上传）。
-
-    与全部 nkb.* 操作 span 共享同一生命周期：创建/属性/结束失败静默隔离；
-    业务异常（含取消）原样传播；不记录异常事件，取消不伪造 error.type；
-    outcome 与安全 error.type 在 span 仍 current 时写入。tracer 为本模块
-    统一 tracer，operation_context 事实经 ``facts`` 发布。
-    """
-    with _operation_span(name, kind, attrs=tuple(attrs), facts=facts) as span:
-        yield span
-
-
-# ---------------------------------------------------------------------------
-# retrieval_attrs：精确白名单投影（结果数 + 过滤条件类型与数量，不带值）
-# ---------------------------------------------------------------------------
-
-_FILTER_FIELDS = ("tags", "source_kind", "document_status", "min_score")
-
-
-def retrieval_attrs(
-    result_count: Optional[int],
-    filters: object = None,
-) -> dict:
-    """Build the `nkb.retrieval.search` span attributes.
-
-    只输出精确白名单键：``nkb.result_count`` 与 ``nkb.filter.<field>`` 计数。
-    过滤条件的值（标签值、来源、分数）从不输出——只输出类型与数量
-    （P058: 精确枚举键集合，无前缀放行）。``filters`` 支持属性访问对象或
-    Mapping（调用方传入 domain ``RetrievalFilter`` 时无需本模块依赖它）。
-    """
-    attrs: dict = {}
-    if result_count is not None:
-        try:
-            attrs[NKB_RESULT_COUNT] = max(0, int(result_count))
-        except Exception:
-            pass
+def retrieval_attrs(result_count, filters=None):
+    attrs = contract.project_attributes({NKB_RESULT_COUNT: result_count})
     if filters is not None:
-        for field in _FILTER_FIELDS:
-            if isinstance(filters, Mapping):
-                if field not in filters:
-                    continue
-                value = filters[field]
-            else:
-                if not hasattr(filters, field):
-                    continue
-                value = getattr(filters, field)
+        for field in ("tags", "source_kind", "document_status", "min_score"):
+            value = (
+                filters.get(field)
+                if isinstance(filters, Mapping)
+                else getattr(filters, field, None)
+            )
             if field == "tags":
                 if isinstance(value, Mapping):
                     attrs[NKB_FILTER_PREFIX + field] = len(value)
@@ -581,246 +659,74 @@ def retrieval_attrs(
     return attrs
 
 
-# ---------------------------------------------------------------------------
-# Metric record helpers（业务终态一次；须在对应操作 span current 时调用）
-# ---------------------------------------------------------------------------
+def record_retrieval(outcome, *, result_count=None, seconds=None):
+    """Compatibility fact submission; elapsed time is owned by the lifecycle."""
+    state = _active_operation.get()
+    if state is not None and state.name == RETRIEVAL_SPAN_NAME:
+        set_operation_result(outcome)
+        _submit(**{NKB_RESULT_COUNT: result_count})
 
 
-def record_retrieval(
-    outcome: str,
-    *,
-    result_count: Optional[int] = None,
-    seconds: Optional[float] = None,
-) -> None:
-    """Record retrieval terminal-state metrics.
-
-    ``nkb.retrieval.requests`` 每业务终态一次（outcome=success/error/cancelled）；
-    ``nkb.retrieval.results`` 仅成功时记录实际结果数；``nkb.retrieval.duration``
-    覆盖所有终态。调用方须在 ``nkb.retrieval.search`` span 仍为 current 时调用。
-    """
-    mapped = map_outcome(outcome)
-    _counter_add(INSTRUMENT_RETRIEVAL_REQUESTS, 1, {"outcome": mapped})
-    if mapped == OUTCOME_SUCCESS and result_count is not None:
-        try:
-            count = max(0, int(result_count))
-        except Exception:
-            count = None
-        if count is not None:
-            _histogram_record(INSTRUMENT_RETRIEVAL_RESULTS, count, {})
-    if seconds is not None:
-        try:
-            elapsed = max(0.0, float(seconds))
-        except Exception:
-            elapsed = 0.0
-        _histogram_record(INSTRUMENT_RETRIEVAL_DURATION, elapsed, {"outcome": mapped})
-
-
-def record_index(outcome: str, *, chunk_count: Optional[int] = None) -> None:
-    """Record index terminal-state metrics.
-
-    ``nkb.index.jobs`` 每业务终态一次；``nkb.index.chunks`` 仅成功时记录
-    实际 chunk 数。调用方须在 ``nkb.index.run`` span 仍为 current 时调用。
-    """
-    mapped = map_outcome(outcome)
-    _counter_add(INSTRUMENT_INDEX_JOBS, 1, {"outcome": mapped})
-    if mapped == OUTCOME_SUCCESS and chunk_count is not None:
-        try:
-            count = max(0, int(chunk_count))
-        except Exception:
-            count = 0
-        _histogram_record(INSTRUMENT_INDEX_CHUNKS, count, {})
-
-
-# ---------------------------------------------------------------------------
-# Embedding operation scope factory（组合根注入 Infrastructure 的观测回调）
-# ---------------------------------------------------------------------------
+def record_index(outcome, *, chunk_count=None):
+    state = _active_operation.get()
+    if state is not None and state.name == INDEX_RUN_SPAN_NAME:
+        set_operation_result(outcome)
+        _submit(**{NKB_CHUNK_COUNT: chunk_count})
 
 
 class EmbeddingObservationScope:
-    """One real embedding model call: GenAI CLIENT span + duration/token metrics.
-
-    Infrastructure（Ollama adapter，T7/T8 接入）通过组合根注入的工厂获得本
-    scope：进入时创建 ``embeddings {model}`` CLIENT span，调用方以
-    ``set_input_tokens`` 上报已知 token 数（缺失不伪造 0），退出时在 span
-    仍为 current 时记录 duration 与 token usage；失败/取消同样记录终态与耗时。
-    """
-
-    def __init__(self, span, model: str) -> None:
+    def __init__(self, span, model):
         self._span = span
         self._model = model
-        self._input_tokens: Optional[int] = None
+        self._input_tokens = None
 
-    def set_input_tokens(self, tokens: Optional[int]) -> None:
-        """Record the known input token count; ``None``/invalid = missing."""
-        if isinstance(tokens, bool) or not isinstance(tokens, int):
-            self._input_tokens = None
-            return
-        self._input_tokens = tokens if tokens >= 0 else None
+    def set_input_tokens(self, tokens):
+        self._input_tokens = tokens if type(tokens) is int and tokens >= 0 else None
 
     def set_input(self, inputs):
-        telemetry_details.update_current_details(embedding_input=embedding_input(self._model,inputs))
+        try:
+            telemetry_details.update_current_details(
+                embedding_input=embedding_input(self._model, inputs)
+            )
+        except Exception:
+            pass
 
     def set_result(self, output_count, dimensions):
-        telemetry_details.update_current_details(embedding_result={"model":self._model,"output_count":output_count,"dimensions":dimensions,"input_tokens":self._input_tokens})
-
-    def _finish(self, seconds: float, exc: Optional[BaseException]) -> None:
-        # Span is still current here (called from inside _span_scope) so the
-        # histogram records carry exemplar linkage (P062).
-        error_type = error_type_for_exception(exc)
-        if self._input_tokens is not None:
-            _set_attr(self._span, GEN_AI_USAGE_INPUT_TOKENS, self._input_tokens)
-            _histogram_record(
-                INSTRUMENT_TOKEN_USAGE,
-                self._input_tokens,
-                {
-                    GEN_AI_OPERATION_NAME: EMBEDDINGS_OPERATION,
-                    GEN_AI_REQUEST_MODEL: self._model,
-                    GEN_AI_TOKEN_TYPE: TOKEN_TYPE_INPUT,
-                },
-            )
-        dimensions = {
-            GEN_AI_OPERATION_NAME: EMBEDDINGS_OPERATION,
-            GEN_AI_REQUEST_MODEL: self._model,
-        }
-        if error_type is not None:
-            dimensions[ERROR_TYPE_ATTR] = error_type
-        _histogram_record(INSTRUMENT_OPERATION_DURATION, seconds, dimensions)
+        telemetry_details.update_current_details(
+            embedding_result={
+                "model": self._model,
+                "output_count": output_count,
+                "dimensions": dimensions,
+                "input_tokens": self._input_tokens,
+            }
+        )
 
 
 @contextmanager
-def embedding_observer(model: object) -> Iterator[EmbeddingObservationScope]:
-    """Scope factory for one embedding model call (GenAI embeddings operation).
-
-    模型仅来自配置（经组合根传入）；失败/取消原样传播且同样记录终态与耗时；
-    token 缺失不记 token usage，但 duration 覆盖所有终态。
-    """
-    mapped_model = map_model_name(model)
-    span = _start_span(f"{EMBEDDINGS_OPERATION} {mapped_model}", SpanKind.CLIENT)
-    _set_attr(span, GEN_AI_OPERATION_NAME, EMBEDDINGS_OPERATION)
-    _set_attr(span, GEN_AI_REQUEST_MODEL, mapped_model)
-    scope = EmbeddingObservationScope(span, mapped_model)
-    start = time.monotonic()
-    exc: Optional[BaseException] = None
-    outcome = OUTCOME_SUCCESS
-    try:
-        with _span_scope(span), operation_context(
-            operation=EMBEDDINGS_OPERATION, model=mapped_model
-        ), telemetry_details.detail_scope():
-            try:
-                yield scope
-            except BaseException as caught:
-                exc = caught
-                outcome = outcome_for_exception(caught)
-                raise
-            finally:
-                try:
-                    scope._finish(time.monotonic() - start, exc)
-                except Exception:
-                    pass
-                if exc is not None and not isinstance(exc, asyncio.CancelledError):
-                    try:
-                        span.set_status(Status(StatusCode.ERROR))
-                    except Exception:
-                        pass
-                    _set_attr(span, ERROR_TYPE_ATTR, error_type_for_exception(exc))
-                _set_attr(span, NKB_OUTCOME, outcome)
-                if exc is not None:
-                    telemetry_details.update_current_details(error={"outcome":outcome,"type":error_type_for_exception(exc)})
-                try:
-                    with operation_context(operation=EMBEDDINGS_OPERATION,outcome=outcome,duration_ms=(time.monotonic()-start)*1000):
-                        logging.getLogger(__name__).log(logging.WARNING if outcome == OUTCOME_ERROR else logging.INFO,
-                            EMBEDDING_COMPLETED_TEMPLATE,outcome,(time.monotonic()-start)*1000)
-                except Exception:
-                    pass
-    finally:
-        _end_span(span)
+def embedding_observer(model):
+    model = map_model_name(model)
+    with _operation_span(
+        EMBEDDINGS_OPERATION,
+        SpanKind.CLIENT,
+        attrs=(
+            (GEN_AI_OPERATION_NAME, EMBEDDINGS_OPERATION),
+            (GEN_AI_REQUEST_MODEL, model),
+            (GEN_AI_PROVIDER_NAME, "ollama"),
+        ),
+    ) as span:
+        scope = EmbeddingObservationScope(span, model)
+        try:
+            yield scope
+        finally:
+            if scope._input_tokens is not None:
+                _submit(**{GEN_AI_USAGE_INPUT_TOKENS: scope._input_tokens})
 
 
-__all__ = [
-    "SEMCONV_VERSION",
-    "GEN_AI_OPERATION_NAME",
-    "GEN_AI_REQUEST_MODEL",
-    "GEN_AI_TOKEN_TYPE",
-    "GEN_AI_USAGE_INPUT_TOKENS",
-    "ERROR_TYPE_ATTR",
-    "NKB_RESULT_COUNT",
-    "NKB_CHUNK_COUNT",
-    "NKB_DOCUMENT_ID",
-    "NKB_OUTCOME",
-    "NKB_FILTER_PREFIX",
-    "OUTCOME_SUCCESS",
-    "OUTCOME_ERROR",
-    "OUTCOME_CANCELLED",
-    "ERROR_TYPES",
-    "ERROR_UNSUPPORTED_FILE_TYPE",
-    "ERROR_FILE_TOO_LARGE",
-    "ERROR_EMBEDDING_FAILED",
-    "ERROR_VECTOR_INDEX_FAILED",
-    "ERROR_SQLITE_FAILED",
-    "ERROR_OTHER",
-    "INSTRUMENT_OPERATION_DURATION",
-    "INSTRUMENT_TOKEN_USAGE",
-    "INSTRUMENT_INDEX_JOBS",
-    "INSTRUMENT_INDEX_CHUNKS",
-    "INSTRUMENT_RETRIEVAL_REQUESTS",
-    "INSTRUMENT_RETRIEVAL_RESULTS",
-    "INSTRUMENT_RETRIEVAL_DURATION",
-    "RETRIEVAL_SPAN_NAME",
-    "INDEX_RUN_SPAN_NAME",
-    "INDEX_STAGES",
-    "EmbeddingObservationScope",
-    "map_error_type",
-    "map_outcome",
-    "map_model_name",
-    "outcome_for_exception",
-    "error_type_for_exception",
-    "retrieval_span",
-    "index_run_span",
-    "index_stage_span",
-    "index_stage_span_name",
-    "set_index_chunk_count",
-    "safe_id",
-    "set_span_attribute",
-    "operation_span",
-    "retrieval_attrs",
-    "record_retrieval",
-    "record_index",
-    "embedding_observer",
-    "operation_context",
-    "current_operation_context",
-]
-
-
-STAGE_COMPLETED_TEMPLATE = "nkb.index.stage.completed stage=%s outcome=%s duration_ms=%.3f"
+# Internal compatibility imports only; these templates are never emitted.
+STAGE_COMPLETED_TEMPLATE = (
+    "nkb.index.stage.completed stage=%s outcome=%s duration_ms=%.3f"
+)
 EMBEDDING_COMPLETED_TEMPLATE = "nkb.embedding.completed outcome=%s duration_ms=%.3f"
-OPERATION_COMPLETED_TEMPLATE = "nkb.operation.completed operation=%s outcome=%s duration_ms=%.3f"
-
-
-def _record_operation_terminal(name, outcome, seconds):
-    """Supplement missing operation metrics inside the owning span scope."""
-    try:
-        dims = {"outcome": map_outcome(outcome)}
-        if name == "nkb.document.upload":
-            _counter_add("nkb.document.uploads", 1, dims)
-            _histogram_record("nkb.document.upload.duration", seconds, dims)
-        elif name == INDEX_RUN_SPAN_NAME:
-            _histogram_record("nkb.index.duration", seconds, dims)
-        elif name.startswith(INDEX_STAGE_SPAN_PREFIX) and name.removeprefix(INDEX_STAGE_SPAN_PREFIX) in INDEX_STAGES:
-            _histogram_record("nkb.index.stage.duration", seconds, {**dims, "stage": name.removeprefix(INDEX_STAGE_SPAN_PREFIX)})
-        elif name == "nkb.mcp.status":
-            dims["operation"] = name
-            _counter_add("nkb.mcp.requests", 1, dims)
-            _histogram_record("nkb.mcp.duration", seconds, dims)
-        if name.startswith(INDEX_STAGE_SPAN_PREFIX) and name.removeprefix(INDEX_STAGE_SPAN_PREFIX) in INDEX_STAGES:
-            with operation_context(operation=name,outcome=outcome,duration_ms=seconds*1000):
-                logging.getLogger(__name__).log(logging.WARNING if outcome == OUTCOME_ERROR else logging.INFO,
-                    STAGE_COMPLETED_TEMPLATE,name.removeprefix(INDEX_STAGE_SPAN_PREFIX),outcome,seconds*1000)
-        if name in ("nkb.document.upload", "nkb.mcp.status"):
-            with operation_context(operation=name, outcome=outcome, duration_ms=seconds * 1000):
-                logging.getLogger(__name__).log(logging.WARNING if outcome == OUTCOME_ERROR else logging.INFO,
-                                               OPERATION_COMPLETED_TEMPLATE, name, outcome, seconds * 1000)
-    except Exception:
-        pass
-
-
-completed_operation = operation_span
+OPERATION_COMPLETED_TEMPLATE = (
+    "nkb.operation.completed operation=%s outcome=%s duration_ms=%.3f"
+)

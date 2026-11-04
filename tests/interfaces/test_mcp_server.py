@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.interfaces.mcp.server import create_mcp_server
+from app.interfaces.mcp.server import create_mcp_server, noop_suppress_scope
 
 
 def structured_tool_result(result):
@@ -309,3 +309,26 @@ def test_stdio_module_entrypoint_exports_main():
     from app.interfaces.mcp import stdio
 
     assert stdio.main is not None
+
+
+@pytest.mark.asyncio
+async def test_stdio_channel_is_bound_at_tool_call_and_restored(monkeypatch):
+    from app import mcp_stdio
+    from app.application import telemetry_semantics as semantics
+    snapshots = []
+    previous_callback = semantics._completion_callback
+    previous_scope = semantics._completion_scope_factory
+    semantics.configure_completion(snapshots.append)
+    services = type('Services', (), {'health': FakeHealthService()})()
+    try:
+        server = mcp_stdio.create_stdio_server(Settings(_env_file=None), services=services,
+                                               suppress_scope=noop_suppress_scope)
+        assert 'nkb.request.channel' not in semantics.current_operation_context()
+        await server.call_tool('status', {})
+        assert snapshots[-1].event == 'nkb.mcp.completed'
+        assert snapshots[-1].attributes['nkb.request.channel'] == 'mcp_stdio'
+        assert snapshots[-1].attributes['nkb.mcp.operation'] == 'status'
+        assert not any(key.startswith('nkb.http.') for key in snapshots[-1].attributes)
+        assert 'nkb.request.channel' not in semantics.current_operation_context()
+    finally:
+        semantics.configure_completion(previous_callback, scope_factory=previous_scope)

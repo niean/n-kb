@@ -60,6 +60,8 @@ class _StringJsonHandler(obs.ObservabilityJsonHandler):
 @pytest.fixture(autouse=True)
 def _reset_state():
     obs._reset_for_tests()
+    from app.application.telemetry_contract import project_execution_attributes
+    obs.configure_execution_context(execution_project=project_execution_attributes)
     yield
     obs._reset_for_tests()
 
@@ -93,12 +95,12 @@ def test_event_code_registry_exact_match():
 
 
 def test_event_code_for_record_prefers_registered_template():
-    obs.register_safe_event("http_request_completed %s", "http_request_completed")
+    obs.register_safe_event("nkb.http.completed %s", "nkb.http.completed")
     record = logging.LogRecord(
         "app.test", logging.INFO, __file__, 1,
-        "http_request_completed %s", ("x",), None,
+        "nkb.http.completed %s", ("x",), None,
     )
-    assert obs.event_code_for(record) == "http_request_completed"
+    assert obs.event_code_for(record) == "nkb.http.completed"
     unregistered = logging.LogRecord(
         "app.test", logging.INFO, __file__, 1, "unregistered %s", ("y",), None,
     )
@@ -135,16 +137,16 @@ def test_log_http_request_completed_facts_and_sanitization(monkeypatch):
         finally:
             span.end()
         first, second = handler.payloads
-        assert first["event"] == "http_request_completed"
+        assert first["event"] == "nkb.http.completed"
         assert first["http.request.method"] == "POST"
         assert first["http.route"] == "/retrieval/search"
         assert first["http.response.status_code"] == 200
-        assert first["duration_ms"] == 12.3
-        assert first["outcome"] == "completed"
+        assert first["nkb.http.duration_ms"] == 12.3
+        assert first["nkb.http.outcome"] == "success"
         assert first["trace_id"] == format(span.get_span_context().trace_id, "032x")
         assert first["span_id"] == format(span.get_span_context().span_id, "016x")
         assert "http.response.status_code" not in second
-        assert second["outcome"] == "cancelled"
+        assert second["nkb.http.outcome"] == "cancelled"
     finally:
         logger.removeHandler(handler)
         provider.shutdown()
@@ -166,18 +168,18 @@ def test_log_http_client_completed_facts(monkeypatch):
             with trace_api.use_span(span, end_on_exit=False):
                 obs.log_http_client_completed(
                     "GET", "models.example", 443, "/v1/models", 200,
-                    "app.infrastructure.vector.qdrant_index:search",
+                    "qdrant.request",
                 )
         finally:
             span.end()
         payload = handler.payloads[0]
-        assert payload["event"] == "http_client_completed"
+        assert payload["event"] == "nkb.http.completed"
         assert payload["http.request.method"] == "GET"
         assert payload["server.address"] == "models.example"
         assert payload["server.port"] == 443
         assert payload["url.template"] == "/v1/models"
         assert payload["http.response.status_code"] == 200
-        assert payload["outcome"] == "completed"
+        assert payload["nkb.http.outcome"] == "success"
         assert payload["span_id"] == format(span.get_span_context().span_id, "016x")
         assert payload["trace_id"] == format(span.get_span_context().trace_id, "032x")
     finally:
@@ -240,7 +242,7 @@ def test_bridge_unregistered_readable_and_drops_raw_exc_info(monkeypatch):
     assert SENTINEL_EXC not in str(prepared.exception_type)
 
 
-def test_bridge_adds_http_client_completed_event_on_current_span(monkeypatch):
+def test_bridge_does_not_synthesize_http_completion_from_plain_log(monkeypatch):
     _sanitized(monkeypatch)
     spy = _SpyOtelHandler()
     bridge = obs.SafeLogBridge(otel_handler=spy)
@@ -251,10 +253,9 @@ def test_bridge_adds_http_client_completed_event_on_current_span(monkeypatch):
     span = provider.get_tracer("t").start_span("GET x", kind=trace_api.SpanKind.CLIENT)
     try:
         with trace_api.use_span(span, end_on_exit=False):
-            log.info("http_client_completed %s", "facts")
-        events = [e for e in span.events if e.name == "http_client_completed"]
-        assert len(events) == 1
-        assert events[0].attributes["message"] == "http_client_completed facts"
+            log.info("nkb.http.completed %s", "facts")
+        events = [e for e in span.events if e.name == "nkb.http.completed"]
+        assert not events
     finally:
         log.removeHandler(bridge)
         span.end()
@@ -352,7 +353,7 @@ def test_json_formatter_fixed_keys_and_exception_type_only():
     )
     payload = json.loads(formatter.format(record))
     assert set(payload) <= {
-        "timestamp", "severity", "logger", "event", "message", "details", "details_unavailable",
+        "timestamp", "severity", "logger", "event", "message", "details", "nkb.observation.error",
         "exception", "trace_id", "span_id", "service.name", "service.instance.id",
     }
     assert payload["event"] == "diagnostic_log"
@@ -423,7 +424,7 @@ def test_facts_survive_default_log_levels(monkeypatch, capsys):
     """回归：装配必须自行把事实 logger 提到 INFO。
 
     默认 root WARNING（事实 logger NOTSET）会把
-    http_request_completed/http_client_completed 静默吞掉；测试不得
+    nkb.http.completed/nkb.http.completed 静默吞掉；测试不得
     monkeypatch 事实 logger 级别来掩盖该缺陷。
     """
     _sanitized(monkeypatch)
@@ -441,17 +442,17 @@ def test_facts_survive_default_log_levels(monkeypatch, capsys):
         )
         obs.log_http_client_completed(
             "GET", "models.example", 443, "/v1/models", 200,
-            "app.infrastructure.vector.qdrant_index:search", 3.5,
+            "qdrant.request", 3.5,
         )
         err = capsys.readouterr().err
         payloads = [json.loads(line) for line in err.splitlines() if line.strip()]
         events = [p["event"] for p in payloads]
-        assert "http_request_completed" in events
-        assert "http_client_completed" in events
+        assert "nkb.http.completed" in events
+        assert "nkb.http.completed" in events
         client_payload = next(
-            p for p in payloads if p["event"] == "http_client_completed"
+            p for p in payloads if p.get("nkb.http.direction") == "client"
         )
-        assert client_payload["duration_ms"] == 3.5
+        assert client_payload["nkb.http.duration_ms"] == 3.5
     finally:
         obs.detach_observability_log_handlers(root=root)
         root.setLevel(old_level)
@@ -623,43 +624,15 @@ def test_json_stderr_with_real_setup(monkeypatch, capsys):
 
 def test_application_completion_templates_registered_by_composition(monkeypatch):
     from app.composition import register_application_log_events
-    from app.application.ingestion_service import INDEX_COMPLETED_TEMPLATES
-    from app.application.retrieval_service import RETRIEVAL_COMPLETED_TEMPLATES
-
+    from app.application import telemetry_contract, telemetry_semantics
     _sanitized(monkeypatch)
-
     register_application_log_events()
-
-    for template in RETRIEVAL_COMPLETED_TEMPLATES:
-        assert obs.event_code_for_template(template) == "nkb.retrieval.completed"
-    for template in INDEX_COMPLETED_TEMPLATES:
-        assert obs.event_code_for_template(template) == "nkb.index.completed"
-
-    record = logging.LogRecord(
-        "app.application.retrieval_service",
-        logging.INFO,
-        __file__,
-        1,
-        RETRIEVAL_COMPLETED_TEMPLATES[0],
-        ("success", 1, 1.5),
-        None,
-    )
-    prepared = obs.project_record(record)
-    assert prepared.event == "nkb.retrieval.completed"
-    assert prepared.message is not None and "results=1" in prepared.message
-
-    index_record = logging.LogRecord(
-        "app.application.ingestion_service",
-        logging.WARNING,
-        __file__,
-        1,
-        INDEX_COMPLETED_TEMPLATES[1],
-        ("doc-1", "error", "parse:error", 2.0),
-        None,
-    )
-    index_prepared = obs.project_record(index_record)
-    assert index_prepared.event == "nkb.index.completed"
-    assert index_prepared.message is not None and "outcome=error" in index_prepared.message
+    for event in telemetry_contract.EVENTS:
+        assert obs.event_code_for_template(event) == event
+    for template in (telemetry_semantics.OPERATION_COMPLETED_TEMPLATE,
+                     telemetry_semantics.STAGE_COMPLETED_TEMPLATE,
+                     telemetry_semantics.EMBEDDING_COMPLETED_TEMPLATE):
+        assert obs.event_code_for_template(template) is None
 
 
 def test_bridge_records_once_and_isolates_failing_callback():
@@ -684,12 +657,19 @@ def test_local_and_otlp_share_safe_event_and_facts():
     from app.infrastructure.observability.snapshots import SafeLogBuffer
     buffer = SafeLogBuffer()
     sink = _SpyOtelHandler()
-    record = logging.LogRecord('test', logging.INFO, '', 1, obs.HTTP_COMPLETED_EVENT + " %s", ("safe",), None)
-    record.http_facts = {'http.request.method':'POST', 'http.response.status_code':200,
-                         'duration_ms':3.5, 'outcome':'completed', 'query':'SECRET'}
+    from app.application.telemetry_semantics import CompletionSnapshot
+    obs.prepare_sanitizer()
     bridge = obs.SafeLogBridge(sink, on_record=buffer.append)
-    bridge.emit(record)
+    logger = logging.getLogger(obs.__name__)
+    logger.addHandler(bridge)
+    try:
+        obs.emit_completion_snapshot(CompletionSnapshot(obs.HTTP_COMPLETED_EVENT, {
+            'http.request.method':'POST', 'http.response.status_code':200,
+            'nkb.http.duration_ms':3.5, 'nkb.http.outcome':'success',
+            'nkb.http.summary':'HTTP completed'}))
+    finally:
+        logger.removeHandler(bridge)
     assert buffer.latest()['items'][0]['attributes'].get('http.response.status_code') == 200
     assert getattr(sink.records[0], 'event', None) == obs.HTTP_COMPLETED_EVENT
     assert sink.records[0].__dict__['http.response.status_code'] == 200
-    assert 'SECRET' not in json.dumps(buffer.latest())
+    assert 'message' not in buffer.latest()['items'][0]['attributes']
