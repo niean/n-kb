@@ -730,3 +730,233 @@ def test_zero_result_bucket_is_enforced_by_runtime_view():
     assert data.explicit_bounds[0] == 0
     assert data.bucket_counts[0] == 1
     provider.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Langfuse 映射契约锁定：三类操作的精确 nkb.content.* 来源
+# ---------------------------------------------------------------------------
+
+LANGFUSE_CONTENT_SOURCES = (
+    "index_input",
+    "index_result",
+    "retrieval_input",
+    "retrieval_output",
+    "embedding_input",
+)
+
+
+@pytest.fixture
+def bounded_details():
+    """激活注入式脱敏通道（与 composition 相同入口），结束后恢复默认禁用。"""
+    from app.application import telemetry_details as td
+
+    td.configure_details(lambda text: text, max_bytes=1024, max_total_bytes=4096)
+    yield td
+    td.configure_details(None)
+
+
+def _assert_content_metadata_types(attributes, field):
+    """四项元数据：存在即类型正确；缺失不补造（不强制全部存在）。"""
+    for suffix, kind in (
+        ("original_bytes", int),
+        ("truncated", bool),
+        ("incomplete", bool),
+        ("observed_bytes", int),
+    ):
+        key = f"nkb.content.{field}_{suffix}"
+        if key not in attributes:
+            continue
+        value = attributes[key]
+        assert type(value) is kind, f"{key} must be {kind.__name__}, got {type(value)}"
+        if kind is int:
+            assert value >= 0
+
+
+def _assert_complete_envelope(attributes, field):
+    content = attributes[f"nkb.content.{field}"]
+    assert type(content) is str
+    assert 0 < len(content.encode("utf-8")) <= 1024
+    assert attributes[f"nkb.content.{field}_original_bytes"] > 0
+    assert type(attributes[f"nkb.content.{field}_truncated"]) is bool
+    _assert_content_metadata_types(attributes, field)
+
+
+def test_content_source_vocabulary_matches_langfuse_mapping_contract():
+    from app.application import telemetry_contract as contract
+
+    for field in LANGFUSE_CONTENT_SOURCES:
+        key = f"nkb.content.{field}"
+        assert contract.ATTRIBUTES.get(key) == "text"
+        assert contract.valid_attribute(key, "bounded safe text")
+    # 应用侧既有 OTel 合同保留 embedding_result（仅 Collector 的 Langfuse
+    # 分支不导出）；锁定应用出口未被 Langfuse 白名单反向收窄。
+    assert contract.ATTRIBUTES.get("nkb.content.embedding_result") == "text"
+    for field in LANGFUSE_CONTENT_SOURCES:
+        for suffix, kind in contract.CONTENT_METADATA.items():
+            assert contract.ATTRIBUTES.get(f"nkb.content.{field}_{suffix}") == kind
+
+
+def test_index_run_span_carries_bounded_content_sources(bounded_details, span_exporter):
+    with ts.index_run_span("doc-42"):
+        bounded_details.update_current_details(index_input={"document_id": "doc-42"})
+        bounded_details.update_current_details(
+            index_result={"document_id": "doc-42", "chunk_count": 3, "stages": ["parse", "split"]}
+        )
+    recorded = _last_span(span_exporter)
+    assert recorded.name == "index.run"
+    assert json.loads(recorded.attributes["nkb.content.index_input"]) == {"document_id": "doc-42"}
+    result_payload = json.loads(recorded.attributes["nkb.content.index_result"])
+    assert result_payload["document_id"] == "doc-42"
+    assert result_payload["chunk_count"] == 3
+    for field in ("index_input", "index_result"):
+        _assert_complete_envelope(recorded.attributes, field)
+    assert len(recorded.events) == 1
+    event = recorded.events[0]
+    assert event.name == "nkb.index.completed"
+    assert event.attributes["nkb.content.index_input"] == recorded.attributes["nkb.content.index_input"]
+    assert event.attributes["nkb.content.index_result"] == recorded.attributes["nkb.content.index_result"]
+
+
+def test_retrieval_search_span_carries_bounded_content_sources(bounded_details, span_exporter):
+    with ts.retrieval_span():
+        bounded_details.update_current_details(
+            retrieval_input={"query": "kb contract", "top_k": 2}
+        )
+        bounded_details.update_current_details(
+            retrieval_output={
+                "result_count": 1,
+                "returned_count": 1,
+                "results": [{"document_id": "doc-1", "snippet": "safe"}],
+            }
+        )
+    recorded = _last_span(span_exporter)
+    assert recorded.name == "retrieval.search"
+    assert json.loads(recorded.attributes["nkb.content.retrieval_input"])["query"] == "kb contract"
+    output_payload = json.loads(recorded.attributes["nkb.content.retrieval_output"])
+    assert output_payload["result_count"] == 1
+    assert output_payload["results"][0]["document_id"] == "doc-1"
+    for field in ("retrieval_input", "retrieval_output"):
+        _assert_complete_envelope(recorded.attributes, field)
+    assert len(recorded.events) == 1
+    event = recorded.events[0]
+    assert event.name == "nkb.retrieval.completed"
+    assert event.attributes["nkb.content.retrieval_input"] == recorded.attributes["nkb.content.retrieval_input"]
+    assert event.attributes["nkb.content.retrieval_output"] == recorded.attributes["nkb.content.retrieval_output"]
+
+
+def test_embeddings_span_carries_bounded_embedding_input_without_synthesized_result(
+    bounded_details, span_exporter
+):
+    with ts.embedding_observer("contract-model") as scope:
+        scope.set_input(["safe one", "safe two"])
+        scope.set_input_tokens(5)
+    recorded = _last_span(span_exporter)
+    assert recorded.name == "embeddings contract-model"
+    payload = json.loads(recorded.attributes["nkb.content.embedding_input"])
+    assert payload["model"] == "contract-model"
+    assert payload["input_count"] == 2
+    assert payload["prefixes_truncated"] is False
+    assert all(
+        type(prefix) is str and len(prefix.encode("utf-8")) <= 256
+        for prefix in payload["text_prefixes"]
+    )
+    _assert_content_metadata_types(recorded.attributes, "embedding_input")
+    # 未报告结果时不合成业务 output（应用层不发布 embedding_result）。
+    assert "nkb.content.embedding_result" not in recorded.attributes
+
+
+def test_embedding_result_outlet_remains_published_at_app_layer(bounded_details, span_exporter):
+    with ts.embedding_observer("result-model") as scope:
+        scope.set_input(["safe"])
+        scope.set_result(1, 1024)
+    recorded = _last_span(span_exporter)
+    result_payload = json.loads(recorded.attributes["nkb.content.embedding_result"])
+    assert result_payload["model"] == "result-model"
+    assert result_payload["output_count"] == 1
+    assert result_payload["dimensions"] == 1024
+
+
+def test_missing_content_directions_are_omitted_independently(bounded_details, span_exporter):
+    with ts.index_run_span("doc-7"):
+        bounded_details.update_current_details(index_input={"document_id": "doc-7"})
+    recorded = _last_span(span_exporter)
+    assert "nkb.content.index_input" in recorded.attributes
+    assert "nkb.content.index_result" not in recorded.attributes
+    with ts.retrieval_span():
+        pass
+    recorded = _last_span(span_exporter)
+    assert not [key for key in recorded.attributes if key.startswith("nkb.content.")]
+
+
+def test_failure_and_cancel_do_not_synthesize_successful_outputs(bounded_details, span_exporter):
+    with pytest.raises(ValueError, match="embedding_provider_failed"):
+        with ts.retrieval_span():
+            bounded_details.update_current_details(retrieval_input={"query": "will fail"})
+            raise ValueError("embedding_provider_failed")
+    recorded = _last_span(span_exporter)
+    assert recorded.attributes["nkb.retrieval.outcome"] == "failure"
+    assert "nkb.content.retrieval_input" in recorded.attributes
+    assert "nkb.content.retrieval_output" not in recorded.attributes
+    # error 详情仅含固定结果与枚举类型，不含异常正文。
+    error_payload = json.loads(recorded.attributes["nkb.content.error"])
+    assert error_payload == {"outcome": "failure", "type": "embedding_failed"}
+
+    with pytest.raises(asyncio.CancelledError):
+        with ts.index_run_span("doc-9"):
+            bounded_details.update_current_details(index_input={"document_id": "doc-9"})
+            raise asyncio.CancelledError()
+    recorded = _last_span(span_exporter)
+    assert recorded.attributes["nkb.index.outcome"] == "cancelled"
+    assert "error.type" not in recorded.attributes
+    assert "nkb.content.index_input" in recorded.attributes
+    assert "nkb.content.index_result" not in recorded.attributes
+
+
+def test_no_observation_or_langfuse_application_attributes(bounded_details, span_exporter):
+    with ts.index_run_span("doc-3"):
+        bounded_details.update_current_details(index_input={"document_id": "doc-3"})
+        bounded_details.update_current_details(index_result={"chunk_count": 1})
+    with ts.retrieval_span():
+        bounded_details.update_current_details(retrieval_input={"query": "q"})
+    with ts.embedding_observer("guard-model") as scope:
+        scope.set_input(["safe"])
+        scope.set_input_tokens(1)
+    assert _spans(span_exporter), "expected spans for all three operations"
+    for recorded in _spans(span_exporter):
+        keys = list(recorded.attributes)
+        for event in recorded.events:
+            keys.extend(event.attributes)
+        for key in keys:
+            assert not key.startswith("observation.")
+            assert not key.startswith("langfuse.")
+
+
+def test_completion_scope_batch_publishes_frozen_attributes_once(bounded_details, span_exporter):
+    entered = []
+
+    class _RecordingScope:
+        def __init__(self, attributes):
+            self._attributes = dict(attributes)
+
+        def __enter__(self):
+            entered.append(self._attributes)
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    ts.configure_completion(
+        callback=None, scope_factory=lambda attributes: _RecordingScope(attributes)
+    )
+    try:
+        with ts.retrieval_span():
+            bounded_details.update_current_details(retrieval_input={"query": "scope"})
+    finally:
+        ts.configure_completion()
+    recorded = _last_span(span_exporter)
+    assert len(recorded.events) == 1
+    assert len(entered) == 1
+    assert (
+        entered[0]["nkb.content.retrieval_input"]
+        == recorded.attributes["nkb.content.retrieval_input"]
+    )

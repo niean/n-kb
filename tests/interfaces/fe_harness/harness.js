@@ -638,6 +638,51 @@ async function scenarioGrafanaUnsafe() {
   return dump();
 }
 
+async function scenarioLangfuse() {
+  const snap = healthySnapshot([], {
+    links: {
+      Metric: 'https://grafana.example.com/?org=2#main',
+      Trace: 'https://grafana.example.com/explore?orgId=1',
+      Log: 'https://grafana.example.com/explore?orgId=1&pane=logs',
+      Profile: 'https://grafana.example.com/explore?orgId=1&pane=profile',
+      // 服务端同名键必须被前端固定 URL 覆盖
+      Langfuse: 'https://evil.example.com/phishing',
+    },
+  });
+  fetchResponder = (url) =>
+    url.startsWith('/observations/otel') ? Promise.resolve(jsonResponse(snap)) : Promise.resolve(jsonResponse(defaultBody(url)));
+  openObservationsTab();
+  await flush();
+  return dump();
+}
+
+async function scenarioLangfuseMissingLinks() {
+  // data.links 缺失 / null / 空对象三种快照，Langfuse 外链仍固定渲染
+  const variants = [
+    healthySnapshot([spanOf(1)]),
+    healthySnapshot([spanOf(1)], { links: null }),
+    healthySnapshot([spanOf(1)], { links: {} }),
+  ];
+  let calls = 0;
+  fetchResponder = (url) => {
+    if (!url.startsWith('/observations/otel')) return Promise.resolve(jsonResponse(defaultBody(url)));
+    calls += 1;
+    return Promise.resolve(jsonResponse(variants[Math.min(calls - 1, variants.length - 1)]));
+  };
+  const states = [];
+  openObservationsTab();
+  await flush();
+  states.push(dump().anchors);
+  for (let i = 0; i < 2; i += 1) {
+    findAnchor('documents').dispatch('click');
+    await flush(3);
+    findAnchor('observations-otel').dispatch('click');
+    await flush();
+    states.push(dump().anchors);
+  }
+  return { states };
+}
+
 async function scenarioEmptyDisabled() {
   const disabled = signal('disabled');
   const snap = {
@@ -871,6 +916,8 @@ const scenarios = {
   pagination: scenarioPagination,
   grafana: scenarioGrafana,
   'grafana-unsafe': scenarioGrafanaUnsafe,
+  langfuse: scenarioLangfuse,
+  'langfuse-missing-links': scenarioLangfuseMissingLinks,
   'empty-disabled': scenarioEmptyDisabled,
   instruments: scenarioInstruments,
   'invalid-snapshot': scenarioInvalidSnapshot,

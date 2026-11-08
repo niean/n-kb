@@ -68,6 +68,10 @@
 - FR
   - 观测：观测语义规范化，NKB O11y Semantic Contract。参照N-Agent，定义N-KB的观测语义，完成代码修改；N-Agent观测语义参见：/Users/niean/code/github.com/niean/n-agent/.harness/knowledge/07-observability.md 对应章节
 
+[20261107]
+- FR
+  - 观测：[KF]引入Langfuse组件，尽量复用OTel组件(如Collector)；现有的OTel能力全部保留，跟Langfuse并存。观测语义等，完全Follow N-Agent。
+
 ---
 
 [待办]

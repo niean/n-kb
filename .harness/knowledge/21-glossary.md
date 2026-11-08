@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 的核心术语，包括文档、来源、标签、分类、chunk、embedding、向量索引、入库任务和检索结果 -->
+<!-- SUMMARY: N-KB 的核心术语，包括文档、来源、标签、分类、chunk、embedding、向量索引、入库任务、检索结果和 Langfuse 观测 -->
 # 术语表
 
 - N-KB：独立知识库与 RAG 服务，为 N-Agent 和其它调用方提供文档管理、入库索引和语义检索能力。
@@ -23,7 +23,9 @@
 - OTel：OpenTelemetry 可观测标准，N-KB 内部观测遵循其 Trace/Metric/Log/Profile 四信号规范，依赖固定 1.45.1 / instrumentation 0.66b1。
 - OTLP：OTel 导出协议，N-KB 经 OTLP/gRPC 将 Trace/Metric/Log 导出到 N-Agent 共享观测栈的 Collector。
 - Semconv：语义约定，N-KB 观测属性命名（如 `nkb.outcome`、`error.type`、`genai.*`）遵循的约定版本，版本号由 `telemetry_semantics.SEMCONV_VERSION` 声明。
-- Trace 串联：N-Agent 调用 N-KB 时经 W3C tracecontext（traceparent/tracestate）传播，使两服务 span 在 Tempo 中呈同一 trace 的直接父子关系。
+- Trace 串联：N-Agent 调用 N-KB 时经 W3C tracecontext（traceparent/tracestate）传播，使两服务 span 在 Tempo 中呈同一 trace 的直接父子关系，并在共享 Langfuse 项目内按相同 Trace ID 合并为完整父子树。
 - Ring Buffer Span：观测运行时内存保留的最近 100 条已结束 sampled span 摘要（八个固定字段），供 `GET /observations/otel` 自检分页展示。
 - Delivery：自检快照中单信号出口的最近投递状态，取值 disabled/unknown/succeeded/failed；仅表示本进程最近一次导出确认，不代表后端已持久化。
 - Profile：进程 CPU 采样画像，由 py-spy 子进程按窗口采样生成折叠栈，经安全投影上传 Pyroscope；需要 SYS_PTRACE 能力（仅 profiling override）。
+- Langfuse：LLM 观测平台（共享栈部署于 n-agent 仓，版本锁定 4.76.0）。N-KB 应用零 Langfuse SDK，Trace 经 N-Agent 共享 Collector fork 的 traces/langfuse-kb 管线以 nkb 专用投影写入单一共享项目 n-agent-local-project（与 N-Agent 同项目、同组项目 Basic 凭据，无独立 N-KB 项目）；跨服务 Trace 关联与映射类型、安全边界的权威定义见 .harness/knowledge/07-observability.md "Langfuse 映射契约"。
+- n-agent-local-project：Langfuse 共享项目，同时承载 N-Agent 与 N-KB 两个服务的 span；凭据经宿主 docker/langfuse/.env（0600）注入，不轮换。

@@ -3,6 +3,7 @@
   const { api, ui } = namespace;
   const { el } = ui;
   const CONTAINER_ID = 'tab-observations-otel';
+  const LANGFUSE_URL = 'http://langfuse.localhost/project/n-agent-local-project/sessions';
   let active = false;
   let currentPage = 1;
   let requestToken = 0;
@@ -113,7 +114,7 @@
 
   function renderLinks(data) {
     const result = panel('外部链接');
-    const links = data.links && typeof data.links === 'object' ? data.links : {};
+    const links = Object.assign({}, data.links || {}, { Langfuse: LANGFUSE_URL });
     const list = el('div', 'otel-links');
     Object.entries(links).forEach(([name, value]) => {
       const href = safeHref(value);

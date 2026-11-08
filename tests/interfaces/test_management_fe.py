@@ -667,6 +667,13 @@ def test_management_index_declares_observations_tab_and_container():
     assert html.index('data-tab="health"') < html.index('data-tab="observations-otel"')
 
 
+def test_observations_page_renders_langfuse_link():
+    js = (STATIC_ROOT / "observations-otel.js").read_text(encoding="utf-8")
+
+    assert "const LANGFUSE_URL = 'http://langfuse.localhost/project/n-agent-local-project/sessions';" in js
+    assert "const links = Object.assign({}, data.links || {}, { Langfuse: LANGFUSE_URL });" in js
+
+
 def test_management_observations_uses_reference_components_and_safe_links():
     js = (STATIC_ROOT / "observations-otel.js").read_text(encoding="utf-8")
     ui_js = (STATIC_ROOT / "management-ui.js").read_text(encoding="utf-8")
@@ -800,11 +807,13 @@ def test_fe_observations_external_links_use_n_agent_names_and_safe_urls():
     result = _run_fe_scenario("grafana")
 
     anchors = result["anchors"]
-    assert len(anchors) == 2
+    assert len(anchors) == 3
     metric_link = next(a for a in anchors if a["text"] == "Metric")
     trace_link = next(a for a in anchors if a["text"] == "Trace")
+    langfuse_link = next(a for a in anchors if a["text"] == "Langfuse")
     assert metric_link["href"] == "https://grafana.example.com/?org=2#main"
     assert trace_link["href"] == "https://grafana.example.com/explore?orgId=1"
+    assert langfuse_link["href"] == "http://langfuse.localhost/project/n-agent-local-project/sessions"
     for anchor in anchors:
         assert anchor["target"] == "_blank"
         assert anchor["rel"] == "noopener noreferrer"
@@ -814,7 +823,40 @@ def test_fe_observations_external_links_use_n_agent_names_and_safe_urls():
 def test_fe_observations_grafana_links_hidden_or_rejected_when_unsafe():
     result = _run_fe_scenario("grafana-unsafe")
 
-    assert result["anchors"] == []
+    # 不安全的服务端链接被拒绝，但固定的 Langfuse 外链始终渲染
+    assert [a["text"] for a in result["anchors"]] == ["Langfuse"]
+    assert result["anchors"][0]["href"] == "http://langfuse.localhost/project/n-agent-local-project/sessions"
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node 运行时不可用时跳过前端行为验证")
+def test_fe_observations_renders_langfuse_link_with_four_signal_links():
+    result = _run_fe_scenario("langfuse")
+
+    anchors = result["anchors"]
+    # 四信号链接之后固定追加 Langfuse，且固定 URL 覆盖服务端同名键
+    assert [a["text"] for a in anchors] == ["Metric", "Trace", "Log", "Profile", "Langfuse"]
+    langfuse = anchors[-1]
+    assert langfuse["href"] == "http://langfuse.localhost/project/n-agent-local-project/sessions"
+    assert langfuse["href"] != "https://evil.example.com/phishing"
+    for anchor in anchors:
+        assert anchor["target"] == "_blank"
+        assert anchor["rel"] == "noopener noreferrer"
+    # textContent 安全渲染，无 HTML 拼接产生的危险节点
+    assert langfuse["text"] == "Langfuse"
+    assert not any(tag in result["createdTags"] for tag in ("SCRIPT", "IMG", "B"))
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node 运行时不可用时跳过前端行为验证")
+def test_fe_observations_renders_langfuse_link_when_links_missing_or_empty():
+    result = _run_fe_scenario("langfuse-missing-links")
+
+    assert len(result["states"]) == 3
+    for anchors in result["states"]:
+        # data.links 缺失 / null / 空对象时仍渲染 Langfuse 外链
+        assert [a["text"] for a in anchors] == ["Langfuse"]
+        assert anchors[0]["href"] == "http://langfuse.localhost/project/n-agent-local-project/sessions"
+        assert anchors[0]["target"] == "_blank"
+        assert anchors[0]["rel"] == "noopener noreferrer"
 
 
 @pytest.mark.skipif(not NODE_AVAILABLE, reason="node 运行时不可用时跳过前端行为验证")
@@ -824,7 +866,9 @@ def test_fe_observations_disabled_and_empty_state_remains_readable():
     body_text = result["bodyText"]
     assert "disabled" in body_text
     assert "暂无已采样 span" in body_text
-    assert result["anchors"] == []
+    # disabled 快照仍固定渲染 Langfuse 外链
+    assert [a["text"] for a in result["anchors"]] == ["Langfuse"]
+    assert result["anchors"][0]["href"] == "http://langfuse.localhost/project/n-agent-local-project/sessions"
     retry_buttons = [item for item in result["elements"] if item["tag"] == "BUTTON" and item["text"] == "重试"]
     assert not retry_buttons
     error_states = [item for item in result["elements"] if "error-state" in item["classes"]]
@@ -909,7 +953,7 @@ def test_complete_signals_render_safely_and_refresh_failure_keeps_snapshot():
         assert value in text
     for extra in ['指标实值', '最近安全日志', 'nkb.retrieval.completed', 'provider_lifetime', 'nkb.result_count']:
         assert extra not in text
-    assert {a['text'] for a in state['before']['anchors']} == {'Metric', 'Log', 'Profile'}
+    assert {a['text'] for a in state['before']['anchors']} == {'Metric', 'Log', 'Profile', 'Langfuse'}
     assert all(not a['href'].startswith('javascript:') for a in state['before']['anchors'])
     assert not any(e['tag'] in ('IMG', 'SCRIPT') for e in state['before']['elements'])
     assert 'span-1' in state['after']['bodyText']

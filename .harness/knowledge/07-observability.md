@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 统一观测语义：对象、操作、属性、结果、完成事实、身份、十三项指标、内容出口及共享查询验证边界 -->
+<!-- SUMMARY: N-KB 统一观测语义：对象、操作、属性、结果、完成事实、身份、十三项指标、内容出口、Langfuse 映射契约及共享查询验证边界 -->
 # 规范观测行为
 
 ## 共性规范与整体模型
@@ -136,6 +136,42 @@ GET /observations/otel 只读快照，不 flush 或探测后端，Cache-Control=
 metric_snapshot 保留 15 秒 reader 最近批次，最多 32 项、每项 100 点；窗口、temporality、截断和 overflow 单独标注，失败保留旧值标 stale，不阻 OTLP。不暴露设备、接口和地址；CPU 利用率去 CPU 维度后均值，CPU 时间及 I/O 按允许维度累加。span/log ring 无正文。
 
 服务端生成四信号外链，沿用 N-Agent Tempo Explore panes 和共享数据源 UID，固定大盘 UID nkb-overview/nkb-logs/nkb-profile；保留反向代理子路径与非冲突参数。仅有效非零 32 位 Trace ID 拼深链，URL 限 HTTP(S)、host、无 userinfo/控制字符/秘密查询键。当前共享大盘沿用既有 service 单选及 All regex，不新增 instance 筛选；Profile 固定 service_name=n-kb，不声称实例或逐 Trace 关联。共享布局契约仅覆盖 overview 前 11 个公共面板，N-Agent 后续领域面板不镜像。
+
+## Langfuse 映射契约
+
+N-KB Trace 经共享 Collector fork 的 traces/langfuse-kb 管线并行投影到 Langfuse 单一共享项目 n-agent-local-project（与 N-Agent 同项目、同组项目 Basic 凭据），与既有 Tempo/Loki/Prometheus/Pyroscope 四信号并存，零回退。两服务经 W3C traceparent 共享同一 Trace ID 时，两条管线投影的 span 在同项目内合并为完整父子树，实现跨服务 Trace 关联展示；KB 投影不改写 parent/trace id，trace 级正文由根门控保证仅一方写入。应用代码零 Langfuse SDK、共享唯一 TracerProvider，span 流原样 OTLP 导出到共享 Collector，投影全部在 Collector 侧完成。类型判定与字段映射的实现位于 n-agent 仓 docker/observability/langfuse-config.py（span_statements_kb），完整方法论文档见 n-agent 仓 .harness/knowledge/07-observability.md 的"N-KB 专属投影契约"小节与部署 Langfuse 并行观测章节；本节只固定 N-KB 侧事实，N-Agent 侧细节不在本文重复。
+
+### 类型映射
+
+自定义操作按 nkb.<object>.operation 的 action 值精确匹配，embeddings 按 gen_ai.operation.name=embeddings 判定。多个专用判别同时冲突时回落 span 并省略专用正文，不依赖语句顺序决定类型；未知操作回落 span。
+
+| N-KB 操作 | Langfuse 类型 | 边界 |
+|---|---|---|
+| retrieval.search | retriever | observation.input=query、output=有限 snippet |
+| index.run | chain | 所有 run 均为 chain；仅全局根 parent_span_id == SpanID(0x0000000000000000) 且正文存在时写 langfuse.trace.input/output；HTTP 或上游父级存在时不提升为根，不改 parent/trace id |
+| embeddings（gen_ai.operation.name=embeddings） | generation | model.name=gen_ai.request.model；usage_details.input=gen_ai.usage.input_tokens，由 nkb.model.usage_known=true 且非负 int 门控（拒绝 bool），真实零保留、未知省略 |
+| document.upload、index.parse/split/embed/write、mcp.status、request.handle、http | span | 默认类型，无专用语句与专用正文 |
+| 其余未知操作 | span | 回落，不开放正文 |
+
+### 内容出口
+
+Langfuse 分支仅开放三类精确来源：chain 取 nkb.content.index_input/index_result，retriever 取 nkb.content.retrieval_input/retrieval_output，generation 取 nkb.content.embedding_input；不导出 embedding_result 与向量。各源均带 original_bytes/truncated/incomplete/observed_bytes 四项完整性元数据，缺失独立省略、不补造；失败或取消不合成成功输出，不把 error 正文作为业务 output。应用侧既有 OTel 合同仍保留全部十一项内容出口，Langfuse 白名单不反向收窄应用出口；精确来源由 tests/application/test_telemetry_semantics.py 的 LANGFUSE_CONTENT_SOURCES 锁定。
+
+### 投影安全边界
+
+KB 投影独立定义精确属性及类型白名单，不复用只接受 nagent.* 的白名单：投影前先清除外来 langfuse.* 与未登记 nkb.*，再按镜像 telemetry_contract 的类型与枚举守卫收窄，不透传任意属性。metadata 仅允许 nkb.index/retrieval 的 operation/outcome/duration_ms、nkb.index.document_id/job_id/chunk_count、nkb.retrieval.result_count、nkb.model.usage_known、gen_ai.provider.name、error.type 及三类信封的完整性元数据。无 gen_ai.conversation.id，session.id 不投影；model.parameters 无白名单数值参数；cost 不投影；release/environment 沿用受限 Resource 校验，投影后 Resource 仅保留 service.name，Scope 清空。清空任意 status.message；level=ERROR 仅真实 Span ERROR，status_message 仅来自固定 error.type 枚举或 outcome failure/timed_out，不复制异常文本。Span Event 只保留登记完成事件与类型正确的安全事实；linksanitize 不能替代属性白名单；未开放操作的正文即使已存在于 OTLP 输入，也从 Langfuse 分支删除。
+
+### 部署边界
+
+Collector fork（otelcol-contrib 0.137.0 + linkprocessor）在 n-agent 仓维护，双管线按服务拆分：traces/langfuse 仅放行 service.name=n-agent，traces/langfuse-kb 仅放行 service.name=n-kb，n-agent 投影输出保持等价；仅 traces 分流，不做 metrics/logs。两条管线写入同一共享项目 n-agent-local-project，使用与主项目相同的一组 Basic 凭据（LANGFUSE_INIT_PROJECT_PUBLIC_KEY/SECRET_KEY 经宿主 docker/langfuse/.env（0600）进入必要的 Collector 配置），不设 LANGFUSE_KB_PROJECT_* 独立凭据；KB 分支 endpoint 由 LANGFUSE_KB_OTEL_ENDPOINT 配置，默认与 n-agent 共用端点、可独立校验。N_OBSERVABILITY_LANGFUSE_ENABLED 是 n-agent 观测栈侧开关（关闭时 langfuse.json 不发布、两条 Langfuse 管线同时停用），N-KB 不新增自有开关、不引入 N_KB_ 前缀的 Langfuse 开关；开关关闭或 Langfuse 未部署时 N-KB 功能不受影响，外链仍渲染。两条 Langfuse exporter 使用独立有界队列与 batch，运行故障按既有观测故障隔离规则处理，不阻塞业务。
+
+### 前端外链
+
+观测页 observations-otel.js 以固定常量 LANGFUSE_URL = http://langfuse.localhost/project/n-agent-local-project/sessions 渲染 Langfuse 外链，Object.assign 合并到四信号 links 之后并覆盖服务端同名键，新窗口打开、rel 含 noopener 与 noreferrer、textContent 安全渲染；data.links 缺失或为空时仍渲染。N-KB 不产生 session.id，共享项目的会话列表归属 N-Agent 会话；与 N-Agent 共享 Trace ID 的跨服务 Trace 在该会话内关联展示，纯 N-KB Trace 的验收从项目 Traces 页面进入。
+
+### 验收入口
+
+自动验证：N-KB 仓 python -m pytest（含 tests/application/test_telemetry_semantics.py 的 Langfuse 契约锁定与 tests/interfaces/test_management_fe.py 的外链断言）；n-agent 仓 tests/test_langfuse_collector.py、tests/test_langfuse_stack.py 与 tests/e2e/test_langfuse_smoke.py（真实 fork 双管线、共享 Trace 合并与故障注入，入口 bash tests/e2e/langfuse_smoke.sh）。人工验收清单见 .harness/specs/verify/verify-261107-langfuse-parallel-observability.md。
 
 ## 验证与部署边界
 
