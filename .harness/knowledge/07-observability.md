@@ -149,13 +149,13 @@ N-KB Trace 经共享 Collector fork 的 traces/langfuse-kb 管线并行投影到
 |---|---|---|
 | retrieval.search | retriever | observation.input=query、output=有限 snippet |
 | index.run | chain | 所有 run 均为 chain；仅全局根 parent_span_id == SpanID(0x0000000000000000) 且正文存在时写 langfuse.trace.input/output；HTTP 或上游父级存在时不提升为根，不改 parent/trace id |
-| embeddings（gen_ai.operation.name=embeddings） | generation | model.name=gen_ai.request.model；usage_details.input=gen_ai.usage.input_tokens，由 nkb.model.usage_known=true 且非负 int 门控（拒绝 bool），真实零保留、未知省略 |
+| embeddings（gen_ai.operation.name=embeddings） | embedding | model.name=gen_ai.request.model；usage_details.input=gen_ai.usage.input_tokens，由 nkb.model.usage_known=true 且非负 int 门控（拒绝 bool），真实零保留、未知省略 |
 | document.upload、index.parse/split/embed/write、mcp.status、request.handle、http | span | 默认类型，无专用语句与专用正文 |
 | 其余未知操作 | span | 回落，不开放正文 |
 
 ### 内容出口
 
-Langfuse 分支仅开放三类精确来源：chain 取 nkb.content.index_input/index_result，retriever 取 nkb.content.retrieval_input/retrieval_output，generation 取 nkb.content.embedding_input；不导出 embedding_result 与向量。各源均带 original_bytes/truncated/incomplete/observed_bytes 四项完整性元数据，缺失独立省略、不补造；失败或取消不合成成功输出，不把 error 正文作为业务 output。应用侧既有 OTel 合同仍保留全部十一项内容出口，Langfuse 白名单不反向收窄应用出口；精确来源由 tests/application/test_telemetry_semantics.py 的 LANGFUSE_CONTENT_SOURCES 锁定。
+Langfuse 分支仅开放三类精确来源：chain 取 nkb.content.index_input/index_result，retriever 取 nkb.content.retrieval_input/retrieval_output，embedding 取 nkb.content.embedding_input；不导出 embedding_result 与向量。各源均带 original_bytes/truncated/incomplete/observed_bytes 四项完整性元数据，缺失独立省略、不补造；失败或取消不合成成功输出，不把 error 正文作为业务 output。应用侧既有 OTel 合同仍保留全部十一项内容出口，Langfuse 白名单不反向收窄应用出口；精确来源由 tests/application/test_telemetry_semantics.py 的 LANGFUSE_CONTENT_SOURCES 锁定。
 
 ### 投影安全边界
 
@@ -170,6 +170,8 @@ Collector fork（otelcol-contrib 0.137.0 + linkprocessor）在 n-agent 仓维护
 观测页 observations-otel.js 以固定常量 LANGFUSE_URL = http://langfuse.localhost/project/n-agent-local-project/sessions 渲染 Langfuse 外链，Object.assign 合并到四信号 links 之后并覆盖服务端同名键，新窗口打开、rel 含 noopener 与 noreferrer、textContent 安全渲染；data.links 缺失或为空时仍渲染。N-KB 不产生 session.id，共享项目的会话列表归属 N-Agent 会话；与 N-Agent 共享 Trace ID 的跨服务 Trace 在该会话内关联展示，纯 N-KB Trace 的验收从项目 Traces 页面进入。
 
 ### 验收入口
+
+共享项目配置修改必须重新生成私有 Collector 配置并重建 Collector；仅修改源码或重启 N-KB 不会替换 Collector 挂载的内容寻址配置。2026-11-08 实机排查发现旧挂载仍使用 KB 独立项目凭据：相同 Trace ID 的父子 span 分别落入两个项目。注释本地 Langfuse .env 中已废弃的 LANGFUSE_KB_PROJECT_* 后，使用 Python 3.13 调用 n-agent 的 docker/observability/manage-stack.py，先执行 compose run 的 Collector validate，再 compose up -d --no-deps --force-recreate otel-collector。只读诊断 Trace 11081108110811081108110811081108 已在 Langfuse events_core 验证双服务同项目及连续父子关系；此操作不迁移历史观测。
 
 自动验证：N-KB 仓 python -m pytest（含 tests/application/test_telemetry_semantics.py 的 Langfuse 契约锁定与 tests/interfaces/test_management_fe.py 的外链断言）；n-agent 仓 tests/test_langfuse_collector.py、tests/test_langfuse_stack.py 与 tests/e2e/test_langfuse_smoke.py（真实 fork 双管线、共享 Trace 合并与故障注入，入口 bash tests/e2e/langfuse_smoke.sh）。人工验收清单见 .harness/specs/verify/verify-261107-langfuse-parallel-observability.md。
 

@@ -150,10 +150,13 @@ body.sidebar-expanded .sidebar__submenu.sidebar__submenu--open:not([hidden]) { d
 .sidebar__item--child.sidebar__item--active { color: var(--color-primary-strong); background: var(--color-bg-active); }
 .sidebar__item:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 body:not(.sidebar-expanded) .sidebar { overflow: visible; }
+/* 展开态导航内部滚动；折叠态允许提示与二级浮层溢出，不被导航容器裁剪 */
 body.sidebar-expanded .sidebar__nav { overflow-x: hidden; overflow-y: auto; }
+body:not(.sidebar-expanded) .sidebar__nav { overflow: visible; }
 body:not(.sidebar-expanded) .sidebar__group { position: relative; }
 body:not(.sidebar-expanded) .sidebar__submenu { position: absolute; top: 0; left: 100%; z-index: 20; min-width: 168px; margin: 0 0 0 6px; padding: 6px; background: var(--color-bg-white); border: 1px solid var(--color-border-light); border-radius: var(--radius-md); box-shadow: var(--shadow-card); }
 body:not(.sidebar-expanded) .sidebar__submenu.sidebar__submenu--open { display: flex; }
+body:not(.sidebar-expanded) .sidebar__group:hover .sidebar__submenu { display: flex; }
 body:not(.sidebar-expanded) .sidebar__item--child { padding: 10px 12px; border-radius: var(--radius-sm); border-left: 0; }
 body:not(.sidebar-expanded) .sidebar__item--child .sidebar__item-label { max-width: none; visibility: visible; opacity: 1; }
 body:not(.sidebar-expanded) .sidebar__item--child.sidebar__item--active { border-left: 0; }

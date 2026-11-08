@@ -3,6 +3,7 @@
 | ID | 描述 | 优先级 | 来源计划 | 发现时间 | 状态 |
 |----|------|--------|---------|---------|------|
 | D001 | pytest 运行时 FastAPI TestClient 触发 StarletteDeprecationWarning，后续需迁移到 httpx2 兼容路径并清除警告 | low | N/A | 2026-08-29 | resolved |
+| D010 | n-agent 观测启动入口随 pyenv 选用 Python 3.11，但现有 langfuse-config.py 的 f-string 表达式需要 Python 3.12+；本次用绝对路径 Python 3.13 完成配置发布，后续需统一入口解释器或恢复 3.11 兼容 | medium | N/A | 2026-11-08 | open |
 
 | D002 | FastAPI/Starlette依赖未锁定，宿主0.136与容器0.162的路由树语义不同；本次已修复观测兼容并验证双版本，后续需统一依赖约束/部署版本回归环境 | medium | N/A | 2026-10-30 | open |
 | D006 | 自动埋点曾将 SQLite CLIENT 按 HTTP 生命周期发布完成事件；规范化任务已按 instrument scope 与 DB 属性区分，增加不产生 HTTP 完成事件回归 | medium | plan-261104-normalize-observability.md | 2026-11-04 | resolved |

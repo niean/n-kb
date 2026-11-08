@@ -72,6 +72,11 @@
 - FR
   - 观测：[KF]引入Langfuse组件，尽量复用OTel组件(如Collector)；现有的OTel能力全部保留，跟Langfuse并存。观测语义等，完全Follow N-Agent。
 
+[20261108]
+- FR
+  - 前端：左导收起时hover提示，一级菜单图标要有hover，告知用户这是什么菜单；同时，左导收起后二级菜单不弹出、无法点击，一并修复。前端的左导应该非常通用，建议跟N-Agent对齐、复用它的公共组件
+  - 观测：N-KB 实际 Ollama 向量请求记录 gen_ai.operation.name=embeddings，但当前 Collector 将其投影为 generation，请修正
+
 ---
 
 [待办]

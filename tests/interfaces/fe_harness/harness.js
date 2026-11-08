@@ -99,6 +99,9 @@ class FakeElement {
     return this.querySelectorAll(sel)[0] || null;
   }
   querySelectorAll(sel) {
+    if (sel === ':scope > .sidebar__item-label') {
+      return this.children.filter((el) => el.nodeType === 1 && el._classes.has('sidebar__item-label'));
+    }
     return [...this.walk()].filter((el) => matchesSelector(el, sel));
   }
   get textContent() {
@@ -151,6 +154,9 @@ function registerElement(el) {
 function docQueryAll(sel) {
   // 所有元素均挂在 document.body 子树下，直接遍历即可覆盖全部候选
   const self = document.body;
+  if (sel === '.sidebar__nav > .sidebar__item, .sidebar__nav > .sidebar__group > .sidebar__item--parent') {
+    return [...self.walk()].filter((el) => el._classes.has('sidebar__item') && !el._classes.has('sidebar__item--child'));
+  }
   return [...self.walk()].filter((el) => matchesSelector(el, sel));
 }
 
@@ -247,12 +253,17 @@ function buildDom() {
   const labels = { overview: '概览', documents: '文档', retrieval: '检索', health: '组件', 'observations-otel': 'OTel' };
   const sidebar = new FakeElement('aside');
   sidebar.id = 'app-sidebar';
+  sidebar.className = 'sidebar__nav';
   const group = new FakeElement('div');
   group.className = 'sidebar__group';
   group.dataset.tabGroup = 'observations';
   const parent = new FakeElement('button');
   parent.className = 'sidebar__item sidebar__item--parent';
   parent.dataset.menuParent = 'observations';
+  const parentLabel = new FakeElement('span');
+  parentLabel.className = 'sidebar__item-label';
+  parentLabel.textContent = '观测';
+  parent.appendChild(parentLabel);
   const submenu = new FakeElement('div');
   submenu.className = 'sidebar__submenu';
   submenu.id = 'submenu-observations';
@@ -498,6 +509,33 @@ async function scenarioNavigation() {
     storageFailure = true;
   } catch (_) { /* storage must not interrupt navigation */ }
   return { alias, repeatRequests, parentCurrent, expandedBeforeEscape, expandedAfterEscape, collapsedHoverExpanded, collapsedAfterEscape, collapsedFocusExpanded, collapsedAfterFocusOut, back, forward, storageFailure, historyEntries, historyIndex };
+}
+
+async function scenarioCollapsedNavigation() {
+  await flush();
+  const topLevelItems = () => docQueryAll('.sidebar__item').filter((item) => !item.classList.contains('sidebar__item--child'));
+  const expandedTitles = topLevelItems().map((item) => item.getAttribute('title'));
+  registry.get('sidebar-toggle').dispatch('click');
+  const collapsedTitles = topLevelItems().map((item) => item.getAttribute('title'));
+  const ariaLabels = topLevelItems().map((item) => item.getAttribute('aria-label'));
+  const parent = docQueryAll('[data-menu-parent="observations"]')[0];
+  parent.dispatch('click');
+  const flyoutExpanded = parent.getAttribute('aria-expanded');
+  findAnchor('health').dispatch('click');
+  await flush();
+  const flyoutAfterSelection = parent.getAttribute('aria-expanded');
+  registry.get('sidebar-toggle').dispatch('click');
+  const restoredTitles = topLevelItems().map((item) => item.getAttribute('title'));
+  return {
+    current: activeTab(),
+    flyoutExpanded,
+    flyoutAfterSelection,
+    title: registry.get('topbar-title').textContent,
+    expandedTitles,
+    collapsedTitles,
+    restoredTitles,
+    ariaLabels,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +948,7 @@ const scenarios = {
   "summary-states": scenarioCompleteSignals,
   malicious: scenarioMalicious,
   navigation: scenarioNavigation,
+  'collapsed-navigation': scenarioCollapsedNavigation,
   'network-failure': scenarioNetworkFailure,
   'http-error': scenarioHttpError,
   'stale-response': scenarioStaleResponse,

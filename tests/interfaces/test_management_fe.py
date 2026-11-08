@@ -554,6 +554,54 @@ def test_management_navigation_persists_and_applies_sidebar_preference():
     assert "global.NKB.navigation = { initNavigation }" in js
 
 
+def test_management_collapsed_sidebar_does_not_clip_flyout():
+    css = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    collapsed_nav = _css_declarations(css, "body:not(.sidebar-expanded) .sidebar__nav")
+    assert "overflow: visible" in collapsed_nav
+    flyout = _css_declarations(
+        css,
+        "body:not(.sidebar-expanded) .sidebar__submenu.sidebar__submenu--open",
+    )
+    assert "display: flex" in flyout
+
+
+def test_management_collapsed_sidebar_tooltips_cover_every_top_level_item():
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    js = (STATIC_ROOT / "management-navigation.js").read_text(encoding="utf-8")
+    sidebar_html = re.search(
+        r'<aside[^>]*id="app-sidebar"[^>]*>(.*?)</aside>', html, re.DOTALL,
+    ).group(1)
+    items = re.findall(
+        r'<(?:a|button) class="sidebar__item(?: sidebar__item--active| sidebar__item--parent)?"[^>]*>'
+        r'.*?<span class="sidebar__item-label">([^<]+)</span>',
+        sidebar_html,
+        re.DOTALL,
+    )
+
+    assert items == ["概览", "文档", "检索", "观测"]
+    assert "'.sidebar__nav > .sidebar__item, .sidebar__nav > .sidebar__group > .sidebar__item--parent'" in js
+    assert "item.querySelector(':scope > .sidebar__item-label')" in js
+    assert "item.setAttribute('aria-label', name)" in js
+    assert "if (expanded) item.removeAttribute('title')" in js
+    assert "else item.setAttribute('title', name)" in js
+    assert "applySidebarTooltips(expanded)" in js
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node 运行时不可用时跳过前端行为验证")
+def test_fe_collapsed_sidebar_flyout_leaf_is_clickable():
+    result = _run_fe_scenario("collapsed-navigation")
+
+    assert result["flyoutExpanded"] == "true"
+    assert result["current"] == "health"
+    assert result["title"] == "组件"
+    assert result["flyoutAfterSelection"] == "false"
+    assert result["expandedTitles"] == [None, None, None, None]
+    assert result["collapsedTitles"] == ["概览", "文档", "检索", "观测"]
+    assert result["restoredTitles"] == [None, None, None, None]
+    assert result["ariaLabels"] == ["概览", "文档", "检索", "观测"]
+
+
 def test_management_navigation_uses_n_agent_parent_menu_components():
     html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     js = (STATIC_ROOT / "management-navigation.js").read_text(encoding="utf-8")

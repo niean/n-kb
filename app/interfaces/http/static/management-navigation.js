@@ -26,11 +26,24 @@
     } catch (_) { /* 写入失败不回滚当前 UI */ }
   }
 
+  function applySidebarTooltips(expanded) {
+    const items = document.querySelectorAll('.sidebar__nav > .sidebar__item, .sidebar__nav > .sidebar__group > .sidebar__item--parent');
+    items.forEach((item) => {
+      const label = item.querySelector(':scope > .sidebar__item-label');
+      if (!label) return;
+      const name = label.textContent.trim();
+      item.setAttribute('aria-label', name);
+      if (expanded) item.removeAttribute('title');
+      else item.setAttribute('title', name);
+    });
+  }
+
   function applySidebarExpanded(expanded) {
     collapsedOpen = false;
     document.body.classList.toggle('sidebar-expanded', expanded);
     const toggle = document.getElementById('sidebar-toggle');
     if (toggle) toggle.setAttribute('aria-expanded', String(expanded));
+    applySidebarTooltips(expanded);
     applySubmenuState(observationTabs.includes(currentTab) ? true : readPref(SUBMENU_PREF_KEY));
   }
 
