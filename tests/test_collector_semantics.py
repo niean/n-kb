@@ -18,6 +18,11 @@ from app.infrastructure.observability.instrumentors import ALLOWED_AUTO_ATTRIBUT
 
 STACK = Path(__file__).resolve().parents[2] / 'n-agent/docker/observability'
 CONFIG = STACK / 'otel-collector.yaml'
+# 共享栈基线快照：n-agent 仓 otel-collector.yaml 在成本观测行（T5：nagent/
+# nkb 的 model.cost_*/billing_*/price_id/pricing_version）合入后的已知良好
+# 状态原样复制。基线不再钉在 git HEAD——n-agent 侧后续任何无关演进都会使
+# 本锁定失败，须有意识地重新生成快照（对照 n-agent 仓当前文件复制）。
+BASELINE = Path(__file__).resolve().parents[1] / 'tests' / 'fixtures' / 'otel-collector-nagent-baseline.yaml'
 CONDITION = 'resource.attributes["service.name"] == "n-kb"'
 EXECUTION = (set(ATTRIBUTES) - CONTENT_ATTRIBUTES) | set(ALLOWED_AUTO_ATTRIBUTES)
 
@@ -36,7 +41,7 @@ def test_exact_contract_projection_and_nagent_unchanged():
         for suffix in CONTENT_METADATA:
             assert any(f'attributes["nkb.content.{field}_{suffix}"]' in s for s in nkb)
     assert 'set(attributes, {}) where ' + CONDITION in nkb
-    baseline = subprocess.check_output(['git', '-C', str(STACK), 'show', 'HEAD:docker/observability/otel-collector.yaml'], text=True, timeout=15)
+    baseline = BASELINE.read_text()
     assert [s for s in statements(current) if CONDITION not in s] == [s for s in statements(baseline) if CONDITION not in s]
     assert not any('nkb.details.' in s or 'attributes["outcome"]' in s for s in nkb)
 
@@ -140,7 +145,8 @@ def convert(config, payload):
 def test_real_collector_conversion_and_nagent_equivalence():
     subprocess.run(['docker','image','inspect','otel/opentelemetry-collector-contrib:0.137.0'],check=True,capture_output=True,timeout=15)
     payload, facts, details = fixture()
-    baseline_config = subprocess.check_output(['git','-C',str(STACK),'show','HEAD:docker/observability/otel-collector.yaml'],text=True, timeout=15)
+    # 与基线锁定同一快照：n-agent 分支对照已知良好状态，而非 git HEAD
+    baseline_config = BASELINE.read_text()
     baseline = convert(baseline_config, payload)
     actual = convert(CONFIG.read_text(), payload)
     def normalize(record):

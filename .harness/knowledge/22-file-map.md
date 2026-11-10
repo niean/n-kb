@@ -1,12 +1,12 @@
-<!-- SUMMARY: N-KB 当前规划源码、测试、配置、Docker 部署和 Harness 任务文件的职责映射 -->
+<!-- SUMMARY: N-KB 当前规划源码、测试、配置、Docker 部署和 Harness 任务文件的职责映射；模型成本观测（domain/cost.py + embedding/pricing_catalog.py + embedding 计价生命周期/遥测接线 + 版本化定价目录与 E2E 成本 fixtures） -->
 # 功能与文件映射
 
 ## 应用入口与配置
 
 - FastAPI 应用入口：`app/main.py`，提供 `create_app`，注册 HTTP/FE 路由并挂载可选 MCP HTTP 入口；负责 FastAPI lifespan 中观测启动、业务服务组装、MCP session 与句柄释放
 - stdio 入口：`app/mcp_stdio.py`，组装 stdio MCP 服务与观测启动，Infrastructure 实现经组合根函数注入
-- 依赖组装：`app/composition.py`，集中组装 Infrastructure 具体实现、Application services 和健康检查服务；含观测装配 `start_observability`、业务日志事件登记、自检快照 callable 构造与 client span 抑制解析
-- 配置模型：`app/config.py`，定义 `Settings`，从 `.env` 和环境变量读取 `N_KB_` 配置（含十二个 otel_ / profiling_ 观测配置）
+- 依赖组装：`app/composition.py`，集中组装 Infrastructure 具体实现、Application services 和健康检查服务；含观测装配 `start_observability`、业务日志事件登记、自检快照 callable 构造、client span 抑制解析与 embedding 计价闭包注入（`make_embedding_cost_calculator`：加载版本化目录，unavailable 降级 pricing_unavailable，不阻断业务）
+- 配置模型：`app/config.py`，定义 `Settings`，从 `.env` 和环境变量读取 `N_KB_` 配置（含十二个 otel_ / profiling_ 观测配置与定价目录 pricing_catalog_path/pricing_catalog_expected_sha256，均为 env-only 启动期绑定）
 - Python 依赖：`pyproject.toml`，定义运行依赖、dev 依赖和 pytest 配置
 - 环境变量模板：`docker/.env.example`，不包含真实密钥和宿主机个人路径
 
@@ -16,6 +16,7 @@
 - 标签领域模型：`app/domain/tag.py`，定义 Tag 和标签解析/校验规则
 - Chunk 领域模型：`app/domain/chunk.py`，定义 Chunk 和 chunk 元数据
 - Embedding 领域模型：`app/domain/embedding.py`，定义 EmbeddingVector、EmbeddingProvider
+- 模型成本领域模型：`app/domain/cost.py`，定义 `AttemptUsage`（input 桶 + not_applicable 声明）、`AttemptCost`（estimated/unknown 不变量）、`UnknownReason` 8 值枚举、`PricingCatalogEntry`/`CatalogResolution` 与纯函数 `calculate_attempt_cost`；与 N-Agent 同语义独立实现，不跨仓导入；纯领域无 SDK 依赖
 - 索引领域模型：`app/domain/indexing.py`，定义 IndexJob、IndexJobStatus、IndexStage
 - 检索领域模型：`app/domain/retrieval.py`，定义 RetrievalQuery、RetrievalResult、RetrievalFilter
 - Repository 端口：`app/domain/repositories.py`，定义 DocumentRepository、ChunkRepository、IndexJobRepository
@@ -28,8 +29,8 @@
 - 检索用例：`app/application/retrieval_service.py`，编排 query embedding、过滤、向量检索和结果转换
 - 健康检查用例：`app/application/health_service.py`，区分进程健康和依赖健康
 - 入库工作流：`app/application/ingestion_graph.py`，在需要时使用 LangGraph 表达入库状态图
-- 观测固定契约：`app/application/telemetry_contract.py`，仅标准库；不可变对象、操作、结果、事件、严格属性类型、十一项内容与十三项 instrument；通用执行投影拒绝内容
-- 观测语义层：`app/application/telemetry_semantics.py`，标准库与 OTel API；管理操作生命周期、冻结完成快照、一次测量及 Span/Event/Log 发布，提供 `embedding_observer` 与受信完成回调
+- 观测固定契约：`app/application/telemetry_contract.py`，仅标准库；不可变对象、操作、结果、事件、严格属性类型、十一项内容与十六项 instrument（含 3 个成本 Counter `nkb.model.cost/cost_components/cost_attempts`）；通用执行投影拒绝内容；模型对象登记 `nkb.model.cost_status/cost_reason/cost_currency/cost_decimal/cost_input_usd/pricing_version/price_id/billing_provider/billing_model` 成本属性键
+- 观测语义层：`app/application/telemetry_semantics.py`，标准库与 OTel API；管理操作生命周期、冻结完成快照、一次测量及 Span/Event/Log 发布，提供 `embedding_observer`（保留 raw_model 精确查价 + 安全 model 标签，finalization 计算/写入 AttemptCost：Span 属性 + `nkb.model.completed` 成本事实）与受信完成回调；`_measure_completion` 发布 3 个 `nkb.model.cost*` Counter；计价闭包经 composition 注入，Infrastructure 不 import Application
 - 请求归属：`app/application/telemetry_requests.py`，独立请求 owner、受信入口 channel 及同步路由线程池结果回传，退出恢复、并发隔离
 
 ## Infrastructure Layer
@@ -37,7 +38,8 @@
 - SQLite store：`app/infrastructure/persistence/sqlite_store.py`，实现文档、chunk、任务 repository 并初始化 schema
 - 本地文件存储：`app/infrastructure/storage/local_object_store.py`，实现 ObjectStore 和路径安全
 - Qdrant VectorIndex：`app/infrastructure/vector/qdrant_index.py`，实现向量写入、删除和检索
-- Ollama EmbeddingProvider：`app/infrastructure/embedding/ollama_provider.py`，调用 Ollama `/api/embed`
+- Ollama EmbeddingProvider：`app/infrastructure/embedding/ollama_provider.py`，调用 Ollama `/api/embed`；成功响应且 data 含合法计量字段后先 `record_tokens` 再解析向量（计量先行），解析失败保留已知 Token 与可计算费用，缺计量记 None -> unknown；output/cache_* 声明 not_applicable
+- Embedding 定价目录：`app/infrastructure/embedding/pricing_catalog.py`，独立 `JsonPricingCatalog` 目录 loader/resolver（JCS 内容哈希 + 预期哈希核对、price_id 唯一、`(billing_provider, billing_model, operation)` 精确匹配 + aliases），与 N-Agent 共用 fixture 契约而非跨仓 import
 - LlamaIndex adapter：`app/infrastructure/rag/llama_index_adapter.py`，实现解析、切分或检索辅助适配
 - 文本 parser：`app/infrastructure/parsers/text_parser.py`，支持 Markdown/Text 原文解析
 
@@ -83,6 +85,7 @@
 - Compose 部署：`docker/docker-compose.yml`，定义 `n-kb`、`qdrant`、`ollama`、`ollama-pull-bge-m3` 服务、端口和 volume；该文件被 `.gitignore` 忽略，本地按需保留宿主机路径
 - Compose 配置样例：`docker/docker-compose.yml.example`，脱敏后的可提交样例，宿主机挂载目录通过 `N_KB_QDRANT_STORAGE_DIR`、`N_KB_OLLAMA_HOME` 覆盖，默认落在项目内 `locals/` 下；显式映射十二个观测配置，`stop_grace_period` 15s
 - 统一观测配置：`docker/observability/compose.yml`，由基础 Compose 顶层 `include` 自动加载；给 n-kb 追加 default 与 external `n-agent-observability` 网络（真实名经 `N_KB_OBS_EXTERNAL_NETWORK` 覆盖，默认 n-telemetry）、可覆盖 collector/pyroscope endpoint、默认关闭的 Profile 开关与 `SYS_PTRACE`；不使用 privileged 或 host PID namespace
+- 版本化价格目录：`docker/observability/model-pricing.json`，与 N-Agent 仓相同内容、同 JCS 哈希（出厂空 prices），经 compose 只读挂载到 `/etc/n-kb/model-pricing.json`
 - Docker 构建忽略：`.dockerignore`，排除 `.claude`、`.harness`、`.git`、缓存、venv、locals、data
 - 本地运行产物：`locals/`、`data/`、`.pytest_cache/`、`__pycache__/`、`*.pyc`、`*.egg-info/` 是运行、测试或构建缓存产物
 
@@ -93,6 +96,8 @@
 - DDD 边界测试：`tests/test_architecture_boundaries.py`
 - Docker Compose 配置测试：`tests/test_docker_compose_config.py`
 - Domain 模型测试：`tests/domain/test_models.py`
+- 模型成本领域测试：`tests/domain/test_cost.py`，覆盖 AttemptCost 值对象不变量、向量 C 精确 Decimal（0.00002）、显式零价 estimated/0、缺 usage unknown、判定顺序与 TokenValue 拒绝规则
+- 定价目录测试：`tests/infrastructure/test_pricing_catalog.py`，覆盖 JCS 哈希/预期哈希核对、重复 price_id 拒绝、精确键/alias 匹配、缺单价 pricing_unavailable、空目录 price_not_found
 - 文档管理用例测试：`tests/application/test_document_service.py`
 - 入库索引用例测试：`tests/application/test_ingestion_service.py`
 - 检索用例测试：`tests/application/test_retrieval_service.py`

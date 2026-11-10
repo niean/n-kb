@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 统一观测语义：对象、操作、属性、结果、完成事实、身份、十三项指标、内容出口、Langfuse 映射契约及共享查询验证边界 -->
+<!-- SUMMARY: N-KB 统一观测语义：对象、操作、属性、结果、完成事实、身份、十六项指标、内容出口、Langfuse 映射契约及共享查询验证边界；模型成本语义（AttemptCost：embedding 计价、nkb.model.* 成本属性、3 个成本 Counter 实测名、Langfuse 成组校验与 unknown 不推价） -->
 # 规范观测行为
 
 ## 共性规范与整体模型
@@ -40,6 +40,7 @@ Trace 表示执行过程和父子关系；完成 Log/Event 表示同一次结束
 | retrieval | nkb.retrieval.result_count / filter_tags | 实际结果数、过滤标签数；非负 int，不记录标签值 |
 | retrieval | nkb.retrieval.filter_source_kind / filter_document_status / filter_min_score | 非负 int 存在计数，固定 0/1，不记录过滤值 |
 | model | nkb.model.usage_known | bool；输入 Token 是否已知，不以未知冒充零 |
+| model | nkb.model.cost_status / cost_reason / cost_currency / cost_decimal / cost_input_usd / pricing_version / price_id / billing_provider / billing_model | 单次 embedding 尝试的 AttemptCost 投影：状态（estimated/unknown）、unknown 受控原因（estimated 才可携带 none，生产者契约固定）、币种（USD）、规范十进制总额、适用 input 分项（output/cache_* 为 not_applicable 不投影）、价格版本、价格项 ID、受信计价身份（billing_provider 固定 ollama/other 枚举）；unknown 不写任何金额与分项，price_id 仅 estimated 或唯一命中后的 unknown 保留 |
 | 模型标准 | gen_ai.operation.name / provider.name / request.model / usage.input_tokens / token.type | embeddings / ollama / 受控配置模型 / 已知非负 int / input；token.type 仅指定 Token instrument 维度 |
 | request | nkb.request.channel / id | api/mcp_http/mcp_stdio/unknown；ID 无真实受信来源时省略，此次未新增请求 ID 协议 |
 | http | nkb.http.direction / caller | server/client；受控调用位置枚举 ollama.embed、qdrant.request、health.check、http.request、unknown |
@@ -82,7 +83,7 @@ HTTP 完整 2xx/3xx 为 success，4xx/5xx 或传输异常为 failure；明确准
 
 ## 指标
 
-十三项 instrument 保留原名称、类型、单位、触发含义和直方图边界；只迁移项目维度。边界及精确维度以 telemetry_contract.INSTRUMENTS 为唯一实现定义，测试逐项固定期望，禁止从注册表自身生成期望。
+十六项 instrument 保留原名称、类型、单位、触发含义和直方图边界；只迁移项目维度。边界及精确维度以 telemetry_contract.INSTRUMENTS 为唯一实现定义，测试逐项固定期望，禁止从注册表自身生成期望。
 
 | instrument | 类型 / 单位 | 一次测量及允许维度 |
 |---|---|---|
@@ -99,8 +100,21 @@ HTTP 完整 2xx/3xx 为 success，4xx/5xx 或传输异常为 failure；明确准
 | nkb.mcp.duration | Histogram / s | 同一 MCP 操作耗时；同上 |
 | gen_ai.client.operation.duration | Histogram / s | 每次实际 embedding 尝试；gen_ai.operation.name/request.model、error.type |
 | gen_ai.client.token.usage | Histogram / {token} | 已知输入 Token，真实零可记、未知省略；gen_ai.operation.name/request.model/token.type |
+| nkb.model.cost | Counter / USD | 一次 embedding 尝试的 estimated 成本金额增量；显式零价 add(0)，unknown 不加金额 |
+| nkb.model.cost_components | Counter / USD | 同次尝试的 input 分项金额增量（output/cache_* 为 not_applicable 不产生分项） |
+| nkb.model.cost_attempts | Counter / {attempt} | 一次 embedding 尝试结束，estimated/unknown 均计数，与采样无关；nkb.model.cost_status、nkb.model.cost_reason 维度 |
 
 Prometheus 将维度点转换为下划线，如 nkb_index_outcome；名称与单位翻译见相邻 n-agent 的 docker/observability/nkb-metric-name-mapping.md。错误率为 failure+timed_out 除以 success+failure+timed_out，取消与准入拒绝单独观察，不塞入该分母。零分母或缺序列显示无数据，不以 vector(0) 伪造。跨实例先 rate 再 sum，p95 保留 le；Token 使用 histogram sum，空命中率使用 le=0 桶与 count。
+
+## 模型成本语义（AttemptCost）
+
+每次实际 Ollama embedding 请求产生一次不可变 AttemptCost：Domain `app/domain/cost.py`（与 N-Agent 同语义独立实现，不跨仓导入）在 HTTP 成功且计量字段合法后由 `EmbeddingObservationScope` finalization 计算一次；索引批处理一次 HTTP 请求计一次（`embed_chunks` 单次 `_post_embed`），检索 `embed_query` 同理，不按 chunk 重复。计量先行：`ollama_provider` 成功响应且 data 含合法计量字段后先 `record_tokens` 再解析向量，解析失败保留已知 Token 与可计算费用；缺计量记 None，即使显式零价也 unknown。
+
+- 四桶与已知性：input 为已知桶，output/cache_read/cache_write 由协议适配器声明 not_applicable，不输出虚构零 Token；显式零价仍 estimated/0。判定顺序与 N-Agent 相同（identity_unresolved -> invalid_usage -> missing_usage -> pricing_unavailable -> price_not_found -> price_ambiguous -> unsupported_pricing -> amount_unrepresentable）；unknown 不携带金额，唯一命中价格项后保留 price_id（组合根透传）。金额序列化界：canonical decimal 字符串每侧至多 340 位，超界金额按 amount_unrepresentable 标 unknown（与遥测契约 681 字符上限及 Collector 守卫对齐，estimated 不在下游被静默丢字段）。
+- 组合根计算器注入：`composition.make_embedding_cost_calculator` 加载版本化价格目录并产出计价闭包，经 telemetry 侧（embedding_observer/semantics）注入；Infrastructure 不 import Application，provider 只传协议事实。计价身份取配置原始模型名（settings.embedding_model）精确查价；观测模型名白名单归一（map_model_name）在后，不丢失原始计价身份。
+- 计价与 Metric 记录不在 sampled 判断内；观测失败不改变业务语义（沿用 `_observe` 吞异常降级模式）。
+- 指标：三个成本 Counter 见指标表；Prometheus 实测名称为 `nkb_model_cost_USD_total`、`nkb_model_cost_components_USD_total`、`nkb_model_cost_attempts_total`（USD 单位实测产生字面 `_USD` 后缀），实测依据见相邻 N-Agent 仓 `docker/observability/nkb-metric-name-mapping.md`；模型维度走白名单（未登记归 other）。
+- Langfuse 投影由 N-Agent 共享 Collector 的 traces/langfuse-kb 管线承担：cost_details 单 input 分项 + total，成组校验不部分成功，非法组 fail-closed 拒绝并保留审计 metadata；unknown 组必须有受控 reason 且无金额；`observation.model.name` 仅 cost_status=estimated 投影阻断自动推价，原始模型键保留在 metadata（见下文 Langfuse 映射契约）。
 
 ## 内容与出口
 
@@ -149,7 +163,7 @@ N-KB Trace 经共享 Collector fork 的 traces/langfuse-kb 管线并行投影到
 |---|---|---|
 | retrieval.search | retriever | observation.input=query、output=有限 snippet |
 | index.run | chain | 所有 run 均为 chain；仅全局根 parent_span_id == SpanID(0x0000000000000000) 且正文存在时写 langfuse.trace.input/output；HTTP 或上游父级存在时不提升为根，不改 parent/trace id |
-| embeddings（gen_ai.operation.name=embeddings） | embedding | model.name=gen_ai.request.model；usage_details.input=gen_ai.usage.input_tokens，由 nkb.model.usage_known=true 且非负 int 门控（拒绝 bool），真实零保留、未知省略 |
+| embeddings（gen_ai.operation.name=embeddings） | embedding | model.name=gen_ai.request.model（仅 cost_status=estimated 投影，unknown 阻断自动推价）；usage_details.input=gen_ai.usage.input_tokens，由 nkb.model.usage_known=true 且非负 int 门控（拒绝 bool），真实零保留、未知省略；cost_details={input,total} 由成本成组校验门控（estimated 且全部适用分项/币种/版本/身份合法，非法组整组拒绝不投影），成本状态/原因/币种/版本/price_id/计费身份经 metadata 导出 |
 | document.upload、index.parse/split/embed/write、mcp.status、request.handle、http | span | 默认类型，无专用语句与专用正文 |
 | 其余未知操作 | span | 回落，不开放正文 |
 
@@ -159,7 +173,7 @@ Langfuse 分支仅开放三类精确来源：chain 取 nkb.content.index_input/i
 
 ### 投影安全边界
 
-KB 投影独立定义精确属性及类型白名单，不复用只接受 nagent.* 的白名单：投影前先清除外来 langfuse.* 与未登记 nkb.*，再按镜像 telemetry_contract 的类型与枚举守卫收窄，不透传任意属性。metadata 仅允许 nkb.index/retrieval 的 operation/outcome/duration_ms、nkb.index.document_id/job_id/chunk_count、nkb.retrieval.result_count、nkb.model.usage_known、gen_ai.provider.name、error.type 及三类信封的完整性元数据。无 gen_ai.conversation.id，session.id 不投影；model.parameters 无白名单数值参数；cost 不投影；release/environment 沿用受限 Resource 校验，投影后 Resource 仅保留 service.name，Scope 清空。清空任意 status.message；level=ERROR 仅真实 Span ERROR，status_message 仅来自固定 error.type 枚举或 outcome failure/timed_out，不复制异常文本。Span Event 只保留登记完成事件与类型正确的安全事实；linksanitize 不能替代属性白名单；未开放操作的正文即使已存在于 OTLP 输入，也从 Langfuse 分支删除。
+KB 投影独立定义精确属性及类型白名单，不复用只接受 nagent.* 的白名单：投影前先清除外来 langfuse.* 与未登记 nkb.*，再按镜像 telemetry_contract 的类型与枚举守卫收窄，不透传任意属性。metadata 仅允许 nkb.index/retrieval 的 operation/outcome/duration_ms、nkb.index.document_id/job_id/chunk_count、nkb.retrieval.result_count、nkb.model.usage_known、成本事实（cost_status/cost_reason/cost_currency/cost_input_usd/cost_decimal/pricing_version/price_id/billing_provider/billing_model，逐键守卫）、gen_ai.provider.name、gen_ai.request.model（unknown 保留原始模型供分析）与 error.type 及三类信封的完整性元数据。无 gen_ai.conversation.id，session.id 不投影；model.parameters 无白名单数值参数；cost_details 经成组校验投影（estimated 单 input 分项 + total，非法组 fail-closed 拒绝，unknown 不推价、不投影 model.name）；release/environment 沿用受限 Resource 校验，投影后 Resource 仅保留 service.name，Scope 清空。清空任意 status.message；level=ERROR 仅真实 Span ERROR，status_message 仅来自固定 error.type 枚举或 outcome failure/timed_out，不复制异常文本。Span Event 只保留登记完成事件与类型正确的安全事实；linksanitize 不能替代属性白名单；未开放操作的正文即使已存在于 OTLP 输入，也从 Langfuse 分支删除。
 
 ### 部署边界
 
@@ -184,3 +198,11 @@ Collector fork（otelcol-contrib 0.137.0 + linkprocessor）在 n-agent 仓维护
 以上不是实际 Tempo/Loki/Prometheus/Pyroscope 存储或 Grafana UI 验收。人工清单见 .harness/specs/verify/verify-261104-normalize-observability.md。应用 after-finish Hook 已重建 N-KB 并通过 /health（status=ok）。共享 Collector/Grafana 本次未重载，Hook 只重建 N-KB；共享配置需按部署流程生效，重载前旧 Collector 仍不能展示新字段。
 
 不删除、改写、回灌历史观测，不双写旧字段。新大盘默认新契约，旧时间段可能不完整，不隐式合并历史标签。历史路由树问题曾于 2026-10-30 以容器内 SDK/ASGI 和跨服务 Trace 验证修复，那是当时证据，不保证旧观测现在仍保留；本次未回写历史 Trace。
+
+## 配置当前目录估算口径
+
+2026-11-10 发布 `2026-11-10-peak-fx7-v1` 目录，两仓内容与部署哈希一致。
+本地 bge-m3 embedding 显式零价；商业 Token 按人民币峰时标准 API 目录价、
+固定 1 USD = 7 CNY 换算，不随峰谷或汇率自动更新。ark-code-latest 保留展示名，
+按用户指定使用 DeepSeek V4.1 Flash 标准价替代估算，套餐实际扣款不在本估算内。
+来源、适用范围及换算说明见 `docker/observability/model-pricing-policy.md`。

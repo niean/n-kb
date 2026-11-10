@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 的 DDD 领域模型速览，帮助技术人员快速理解限界上下文、聚合、值对象、端口与核心业务流 -->
+<!-- SUMMARY: N-KB 的 DDD 领域模型速览，帮助技术人员快速理解限界上下文、聚合、值对象、端口与核心业务流；含 AttemptCost 模型成本值对象（embedding 计价） -->
 # 领域模型速览
 
 ## 目标
@@ -67,6 +67,8 @@ N-KB 是独立上下文，不是 N-Agent 的内部模块。
 - `RetrievalQuery`：检索请求，包含 query、filters、top_k、min_score
 - `RetrievalFilter`：标签、来源、文档状态等过滤条件
 - `RetrievalResult`：检索结果，面向应用层和接口层暴露稳定结构
+
+`AttemptCost`（`app/domain/cost.py`）是与 N-Agent 同语义独立实现的模型成本值对象：每次实际 Ollama embedding 请求由纯函数 `calculate_attempt_cost` 计算一次，input 桶用量已知才计价，output/cache_* 为协议适配器声明的 not_applicable；结果为 estimated（携带 USD 金额、input 分项、价格版本与价格项 ID）或 unknown（仅携带受控原因枚举，无金额），全程 Decimal 精确。它不持久化，只作为观测三信号（Span 属性、完成事实、Counter）与 Langfuse 投影的唯一成本事实来源。
 
 这些对象共同表达了“从文档到检索结果”的业务链路。
 

@@ -960,3 +960,442 @@ def test_completion_scope_batch_publishes_frozen_attributes_once(bounded_details
         entered[0]["nkb.content.retrieval_input"]
         == recorded.attributes["nkb.content.retrieval_input"]
     )
+
+
+# ---------------------------------------------------------------------------
+# T6: embeddings 成本事实与三个成本 Counter
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cost_calculator():
+    """保存/恢复模块级计价闭包，避免跨测试泄漏。"""
+    saved = ts._cost_calculator
+    yield
+    ts._cost_calculator = saved
+
+
+def _estimated_result(amount="0.00002", billing_model="cost-model", **overrides):
+    from decimal import Decimal
+
+    result = {
+        "status": "estimated",
+        "amount_usd": float(Decimal(amount)),
+        "cost_decimal": amount,
+        "components": {"input": float(Decimal(amount))},
+        "pricing_version": "v-test@1",
+        "price_id": "p1",
+        "reason": None,
+        "currency": "USD",
+        "billing_provider": "ollama",
+        "billing_model": billing_model,
+    }
+    result.update(overrides)
+    return result
+
+
+_COST_DIMS = {
+    "gen_ai.operation.name": "embeddings",
+    "nkb.model.billing_provider": "ollama",
+}
+
+
+def test_set_input_tokens_distinguishes_known_invalid_missing():
+    with ts.embedding_observer("state-model") as scope:
+        assert scope._input_state == "unknown"
+        scope.set_input_tokens(7)
+        assert scope._input_state == "known"
+        scope.set_input_tokens(-3)
+        assert scope._input_state == "invalid"
+        scope.set_input_tokens("7")
+        assert scope._input_state == "invalid"
+        scope.set_input_tokens(True)
+        assert scope._input_state == "invalid"
+        scope.set_input_tokens(None)
+        assert scope._input_state == "unknown"
+
+
+def test_embedding_cost_estimated_records_facts_and_counters(
+    reader, span_exporter, cost_calculator
+):
+    ts._cost_calculator = lambda facts: _estimated_result()
+    with ts.embedding_observer("cost-model") as scope:
+        scope.set_input_tokens(200)
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "estimated"
+    assert span.attributes["nkb.model.cost_usd"] == 0.00002
+    assert span.attributes["nkb.model.cost_input_usd"] == 0.00002
+    assert span.attributes["nkb.model.cost_decimal"] == "0.00002"
+    assert span.attributes["nkb.model.cost_currency"] == "USD"
+    assert span.attributes["nkb.model.pricing_version"] == "v-test@1"
+    assert span.attributes["nkb.model.price_id"] == "p1"
+    assert span.attributes["nkb.model.billing_provider"] == "ollama"
+    assert span.attributes["nkb.model.billing_model"] == "cost-model"
+    assert span.attributes["nkb.model.usage_known"] is True
+    assert span.attributes["gen_ai.usage.input_tokens"] == 200
+    event = span.events[0]
+    assert event.name == "nkb.model.completed"
+    assert event.attributes["nkb.model.cost_status"] == "estimated"
+    assert event.attributes["nkb.model.cost_usd"] == 0.00002
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "cost-model"}
+    assert _counter_delta(reader, "nkb.model.cost", dims) == 0.00002
+    assert (
+        _counter_delta(
+            reader, "nkb.model.cost_components", {**dims, "nkb.model.cost_component": "input"}
+        )
+        == 0.00002
+    )
+    assert (
+        _counter_delta(
+            reader,
+            "nkb.model.cost_attempts",
+            {**dims, "nkb.model.cost_status": "estimated", "nkb.model.cost_reason": "none"},
+        )
+        == 1
+    )
+    # unknown 出口不产生任何金额
+    assert _counter_delta(reader, "nkb.model.cost", {**dims, "nkb.model.billing_model": "absent-model"}) == 0
+
+
+def test_cost_counter_model_label_outside_whitelist_is_other(
+    reader, span_exporter, cost_calculator
+):
+    """三个成本 Counter 的模型维度必须走 map_model_name 白名单（未通过
+    model 校验 -> other），任意计费模型名不得直接成为指标标签；
+    Span/metadata 的计费身份投影（map_billing_model）保留真实名称。"""
+    result = _estimated_result(billing_model="bad model!")
+    ts._cost_calculator = lambda facts: result
+    with ts.embedding_observer("bad model!") as scope:
+        scope.set_input_tokens(200)
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "other"}
+    assert _counter_delta(reader, "nkb.model.cost", dims) == 0.00002
+    assert (
+        _counter_delta(
+            reader,
+            "nkb.model.cost_attempts",
+            {**dims, "nkb.model.cost_status": "estimated", "nkb.model.cost_reason": "none"},
+        )
+        == 1
+    )
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.billing_model"] == "bad model!"
+
+
+def test_embedding_cost_explicit_zero_still_adds_counter(
+    reader, span_exporter, cost_calculator
+):
+    ts._cost_calculator = lambda facts: _estimated_result(
+        amount="0", billing_model="zero-model"
+    )
+    with ts.embedding_observer("zero-model") as scope:
+        scope.set_input_tokens(0)
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "zero-model"}
+    key = frozenset(dims.items())
+    baseline = _clean_collectors.baseline.get("nkb.model.cost", {}).get("series", {})
+    after = _snapshot(reader).get("nkb.model.cost", {}).get("series", {})
+    # 显式零价：estimated 也要 add(0)，序列必须存在（区别于从未记录）
+    assert key not in baseline
+    assert key in after and after[key] == 0.0
+
+
+def test_embedding_cost_unknown_records_status_reason_without_amounts(
+    reader, span_exporter, cost_calculator
+):
+    ts._cost_calculator = lambda facts: {
+        "status": "unknown",
+        "reason": "price_not_found",
+        "currency": "USD",
+        "pricing_version": "v-test@1",
+        "billing_provider": "ollama",
+        "billing_model": "unknown-model",
+        "amount_usd": 0.0,
+        "price_id": None,
+        "cost_decimal": None,
+        "components": None,
+    }
+    with ts.embedding_observer("unknown-model") as scope:
+        scope.set_input_tokens(5)
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "unknown"
+    assert span.attributes["nkb.model.cost_reason"] == "price_not_found"
+    assert span.attributes["nkb.model.pricing_version"] == "v-test@1"
+    assert span.attributes["nkb.model.billing_provider"] == "ollama"
+    for key in (
+        "nkb.model.cost_usd",
+        "nkb.model.cost_decimal",
+        "nkb.model.cost_input_usd",
+        "nkb.model.price_id",
+    ):
+        assert key not in span.attributes
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "unknown-model"}
+    assert (
+        _counter_delta(
+            reader,
+            "nkb.model.cost_attempts",
+            {**dims, "nkb.model.cost_status": "unknown", "nkb.model.cost_reason": "price_not_found"},
+        )
+        == 1
+    )
+    assert _counter_delta(reader, "nkb.model.cost", dims) == 0
+    assert _counter_delta(reader, "nkb.model.cost_components", dims) == 0
+
+
+def test_embedding_cost_unknown_retains_price_id_only_when_resolved(
+    reader, span_exporter, cost_calculator
+):
+    # 唯一命中价格项后的 unknown 保留 price_id 供追溯；未定位价格项的
+    # unknown 不携带（price_id 不是自动推价材料——unknown 不投影 model.name）
+    ts._cost_calculator = lambda facts: {
+        "status": "unknown",
+        "reason": "amount_unrepresentable",
+        "currency": "USD",
+        "pricing_version": "v-test@1",
+        "billing_provider": "ollama",
+        "billing_model": "ttl-model",
+        "amount_usd": 0.0,
+        "price_id": "p-ollama-ttl",
+        "cost_decimal": None,
+        "components": None,
+    }
+    with ts.embedding_observer("ttl-model") as scope:
+        scope.set_input_tokens(5)
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "unknown"
+    assert span.attributes["nkb.model.cost_reason"] == "amount_unrepresentable"
+    assert span.attributes["nkb.model.pricing_version"] == "v-test@1"
+    assert span.attributes["nkb.model.price_id"] == "p-ollama-ttl"
+    assert "nkb.model.cost_usd" not in span.attributes
+    assert "nkb.model.cost_decimal" not in span.attributes
+    assert "nkb.model.name" not in span.attributes
+
+
+# ---------------------------------------------------------------------------
+# 真实组合根接线（用户评审修复 第五轮-nkb）：计价闭包经
+# composition.make_embedding_cost_calculator 按生产方式装配，不伪造结果 dict
+# ---------------------------------------------------------------------------
+
+
+def _configure_catalog_calculator(tmp_path, unit_price):
+    """写入临时定价目录并按生产方式装配组合根计价闭包。"""
+    import hashlib
+
+    from app.composition import make_embedding_cost_calculator
+    from app.config import Settings
+    from app.infrastructure.embedding.pricing_catalog import jcs_canonicalize
+
+    catalog = {
+        "schema_version": 1,
+        "content_version": "test-cost-fix-v1",
+        "currency": "USD",
+        "prices": [
+            {
+                "price_id": "p-tiny",
+                "billing_provider": "ollama",
+                "billing_model": "bge-m3",
+                "operation": "embeddings",
+                "aliases": [],
+                "unit_prices": {"input": unit_price},
+                "source_url": "test://pricing",
+                "verified_at": "2026-11-10",
+            }
+        ],
+    }
+    text = json.dumps(catalog, ensure_ascii=False)
+    path = tmp_path / "catalog.json"
+    path.write_text(text, encoding="utf-8")
+    sha = hashlib.sha256(
+        jcs_canonicalize(json.loads(text)).encode("utf-8")
+    ).hexdigest()
+    settings = Settings(
+        pricing_catalog_path=str(path),
+        pricing_catalog_expected_sha256=sha,
+    )
+    ts.configure_embedding_cost_calculator(
+        make_embedding_cost_calculator(settings)
+    )
+
+
+def test_composition_calculator_unknown_after_unique_resolution_keeps_price_id(
+    span_exporter, cost_calculator, tmp_path
+):
+    # 唯一命中价格项后的 unknown（amount_unrepresentable）必须把 price_id
+    # 带过组合根并投影到 Span（评审修复：组合根 unknown 分支漏传 price_id）
+    _configure_catalog_calculator(tmp_path, "1e400")
+    try:
+        with ts.embedding_observer("bge-m3") as scope:
+            scope.set_input_tokens(1)
+    finally:
+        ts.configure_embedding_cost_calculator()
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "unknown"
+    assert span.attributes["nkb.model.cost_reason"] == "amount_unrepresentable"
+    assert span.attributes["nkb.model.price_id"] == "p-tiny"
+    assert span.attributes["nkb.model.pricing_version"].startswith("test-cost-fix-v1@")
+    assert "nkb.model.cost_usd" not in span.attributes
+    assert "nkb.model.cost_decimal" not in span.attributes
+
+
+def test_composition_calculator_tiny_price_estimated_projects_cost_decimal(
+    span_exporter, cost_calculator, tmp_path
+):
+    # 1e-70 单价 x 1 Token = 1e-76：金额 double 可表示，规范 cost_decimal
+    # 字符串 78 字符必须完整投影（评审修复：64 字符契约上限静默丢字段）
+    _configure_catalog_calculator(tmp_path, "1e-70")
+    try:
+        with ts.embedding_observer("bge-m3") as scope:
+            scope.set_input_tokens(1)
+    finally:
+        ts.configure_embedding_cost_calculator()
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "estimated"
+    assert span.attributes["nkb.model.cost_decimal"] == "0." + "0" * 75 + "1"
+    assert span.attributes["nkb.model.cost_usd"] == float("1e-76")
+    assert span.attributes["nkb.model.price_id"] == "p-tiny"
+
+
+def test_embedding_cost_receives_protocol_facts_with_raw_model(cost_calculator):
+    captured = {}
+    ts._cost_calculator = lambda facts: captured.update(facts) or {
+        "status": "unknown", "reason": "missing_usage", "currency": "USD",
+    }
+    with ts.embedding_observer("facts-model"):
+        pass
+    assert captured["operation"] == "embeddings"
+    assert captured["raw_model"] == "facts-model"
+    assert captured["input_state"] == "unknown"
+
+
+def test_embedding_cost_invalid_state_not_folded_into_missing(cost_calculator):
+    captured = {}
+    ts._cost_calculator = lambda facts: captured.update(facts) or {
+        "status": "unknown", "reason": "invalid_usage", "currency": "USD",
+    }
+    with ts.embedding_observer("invalid-model") as scope:
+        scope.set_input_tokens("7")
+    assert captured["input_state"] == "invalid"
+    assert captured["input_value"] == "7"
+
+
+def test_embedding_cost_malformed_estimated_downgrades_and_counts_attempt(
+    reader, span_exporter, cost_calculator
+):
+    # 畸形 estimated（缺版本）：Metric 仍按 unknown 计 attempts，无任何金额出口
+    ts._cost_calculator = lambda facts: _estimated_result(
+        pricing_version="", billing_model="downgrade-model"
+    )
+    with ts.embedding_observer("downgrade-model") as scope:
+        scope.set_input_tokens(5)
+    span = _last_span(span_exporter)
+    assert "nkb.model.cost_status" not in span.attributes
+    assert "nkb.model.cost_usd" not in span.attributes
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "downgrade-model"}
+    assert (
+        _counter_delta(
+            reader,
+            "nkb.model.cost_attempts",
+            {**dims, "nkb.model.cost_status": "unknown", "nkb.model.cost_reason": "pricing_unavailable"},
+        )
+        == 1
+    )
+    assert _counter_delta(reader, "nkb.model.cost", dims) == 0
+
+    # 金额不可表示（NaN）：降级为 amount_unrepresentable
+    ts._cost_calculator = lambda facts: _estimated_result(
+        amount=float("nan"), billing_model="nan-model"
+    )
+    with ts.embedding_observer("nan-model") as scope:
+        scope.set_input_tokens(5)
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "nan-model"}
+    assert (
+        _counter_delta(
+            reader,
+            "nkb.model.cost_attempts",
+            {**dims, "nkb.model.cost_status": "unknown", "nkb.model.cost_reason": "amount_unrepresentable"},
+        )
+        == 1
+    )
+
+
+def test_embedding_without_calculator_records_no_cost_counters(
+    reader, span_exporter, cost_calculator
+):
+    assert ts._cost_calculator is None
+    with ts.embedding_observer("nocost-model") as scope:
+        scope.set_input_tokens(3)
+    span = _last_span(span_exporter)
+    for key in (
+        "nkb.model.cost_status",
+        "nkb.model.cost_reason",
+        "nkb.model.cost_usd",
+        "nkb.model.pricing_version",
+        "nkb.model.billing_provider",
+    ):
+        assert key not in span.attributes
+    for name in ("nkb.model.cost", "nkb.model.cost_components", "nkb.model.cost_attempts"):
+        for series in _snapshot(reader).get(name, {}).get("series", {}):
+            assert _counter_delta(reader, name, dict(series)) == 0
+
+
+def test_embedding_observer_maps_label_but_prices_with_trusted_identity(
+    span_exporter, cost_calculator
+):
+    captured = {}
+    ts._cost_calculator = lambda facts: captured.update(facts) or _estimated_result(
+        billing_model="trusted-model"
+    )
+    with ts.embedding_observer("bad model!"):
+        pass
+    span = _last_span(span_exporter)
+    # 观测标签走白名单归一；计价身份由受信配置闭包给出，不受请求模型影响
+    assert span.attributes["gen_ai.request.model"] == "other"
+    assert captured["raw_model"] == "bad model!"
+    assert span.attributes["nkb.model.billing_model"] == "trusted-model"
+
+
+def test_embedding_observer_error_terminal_still_records_cost(
+    reader, span_exporter, cost_calculator
+):
+    # 业务异常路径同样完成计价收口（tokens 已承接的已知事实参与计价）
+    ts._cost_calculator = lambda facts: _estimated_result(billing_model="error-model")
+    with pytest.raises(ValueError, match="embedding_provider_failed"):
+        with ts.embedding_observer("error-cost-model") as scope:
+            scope.set_input_tokens(9)
+            raise ValueError("embedding_provider_failed")
+    dims = {**_COST_DIMS, "nkb.model.billing_model": "error-model"}
+    assert _counter_delta(reader, "nkb.model.cost", dims) == 0.00002
+    span = _last_span(span_exporter)
+    assert span.attributes["nkb.model.cost_status"] == "estimated"
+    assert span.attributes["nkb.model.outcome"] == "failure"
+
+
+def test_map_billing_provider_and_model():
+    assert ts.map_billing_provider("ollama") == "ollama"
+    assert ts.map_billing_provider("openai") == "other"
+    assert ts.map_billing_provider(None) == "other"
+    assert ts.map_billing_provider("") == "other"
+    assert ts.map_billing_model("bge-m3") == "bge-m3"
+    assert ts.map_billing_model("  bge-m3  ") == "bge-m3"
+    assert ts.map_billing_model("") == "other"
+    assert ts.map_billing_model(7) == "other"
+    assert ts.map_billing_model("x" * 65) == "other"
+    assert ts.map_billing_model("x" * 64) == "x" * 64
+    # 控制字符拒绝与 contract 的 billing_model 校验对齐（Metric 维度
+    # 不经过 valid_attribute，必须在此拦下）
+    assert ts.map_billing_model("bge\t-m3") == "other"
+    assert ts.map_billing_model("bge\n-m3") == "other"
+    assert ts.map_billing_model("bge\x7f-m3") == "other"
+
+
+def test_cost_reason_vocabulary_mirrors_domain_unknown_reasons():
+    assert ts._KNOWN_COST_REASONS == frozenset(
+        {
+            "missing_usage",
+            "invalid_usage",
+            "price_not_found",
+            "price_ambiguous",
+            "unsupported_pricing",
+            "identity_unresolved",
+            "pricing_unavailable",
+            "amount_unrepresentable",
+        }
+    )

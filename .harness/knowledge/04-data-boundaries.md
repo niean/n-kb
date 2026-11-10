@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 的领域数据模型、配置模型、SQLite schema、Qdrant payload、HTTP API 边界和 Docker Compose 数据挂载边界 -->
+<!-- SUMMARY: N-KB 的领域数据模型、配置模型、SQLite schema、Qdrant payload、HTTP API 边界和 Docker Compose 数据挂载边界；AttemptCost 域数据结构与 nkb.model.* 成本属性键；定价目录配置（N_KB_PRICING_CATALOG_PATH/EXPECTED_SHA256，B 类 env-only，JCS 哈希锁定，与 N-Agent 部署相同内容目录） -->
 # 数据与类型边界
 
 ## 领域模型
@@ -13,7 +13,9 @@
 
 `Chunk`（`app/domain/chunk.py`）：文档切片值对象，字段包括 id、document_id、ordinal、text、content_hash、token_count、metadata。
 
-`EmbeddingVector`（`app/domain/embedding.py`）：向量值对象，字段包括 chunk_id、model、dimensions、values。values 不写入 SQLite，不通过 HTTP API 返回。
+- EmbeddingVector（`app/domain/embedding.py`）：向量值对象，字段包括 chunk_id、model、dimensions、values。values 不写入 SQLite，不通过 HTTP API 返回。
+
+`AttemptCost`（`app/domain/cost.py`）：单次 embedding 尝试的成本事实值对象（frozen dataclass，schema_version=1，与 N-Agent 同语义独立实现，不跨仓导入），字段包括 status（`estimated`/`unknown`）、currency（USD）、amount_usd（Decimal|None）、components、pricing_version、price_id、reason。配套 `AttemptUsage`（input 已知桶，output/cache_read/cache_write 由协议适配器声明 not_applicable）、`UnknownReason` 八值枚举、`PricingCatalogEntry`/`CatalogResolution` 与纯函数 `calculate_attempt_cost`（判定顺序与 N-Agent 相同）。索引批处理一次 HTTP 请求计一次，检索一次；缺计量即使零价仍 unknown。语义见 07-observability.md 模型成本语义章节。
 
 `IndexJob`（`app/domain/indexing.py`）：入库/重建索引任务，字段包括 id、document_id、status、stage、error、created_at、updated_at。
 
@@ -67,6 +69,11 @@
 - profiling_interval_seconds
 
 其中 otel_ / profiling_ 十二项为观测配置（env-only，启动期读取，无运行时修改接口）；exporter/Profile endpoint 强制 http/https、拒绝 userinfo/query/fragment；Grafana URL支持非秘密查询参数，拒绝userinfo/控制字符/秘密查询键及fragment，sample_ratio 限 0..1，interval 限 10..300 秒。新增三项外链优先于base_url派生值，单数profile命名与N-Agent一致。
+
+定价目录配置（B 类 env-only，启动期加载一次、重启生效；不进 Dashboard）：
+
+- pricing_catalog_path (str, 默认 "")：版本化价格目录 JSON 文件路径（`N_KB_PRICING_CATALOG_PATH`，默认部署 `/etc/n-kb/model-pricing.json`，只读挂载 `docker/observability/model-pricing.json`）。N-Agent 与 N-KB 部署相同内容的目录文件并核对同一预期哈希；出厂目录为空 prices。
+- pricing_catalog_expected_sha256 (str, 默认 "")：目录内容的预期 SHA-256（`N_KB_PRICING_CATALOG_EXPECTED_SHA256`，64 位小写 hex）。哈希对目录 JSON 经 RFC 8785（JCS）规范化后的 UTF-8 字节计算；缺失按目录不可用处理（成本 pricing_unavailable），不符时目录失效，业务继续。
 
 Docker Compose 项目名不属于应用配置，由 Docker Compose 读取 `COMPOSE_PROJECT_NAME`。
 

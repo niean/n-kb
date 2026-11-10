@@ -1,4 +1,4 @@
-<!-- SUMMARY: N-KB 的 DDD 架构边界、RAG 服务边界、依赖方向和核心模块原则 -->
+<!-- SUMMARY: N-KB 的 DDD 架构边界、RAG 服务边界、依赖方向和核心模块原则；模型成本计价子域（domain AttemptCost 纯计算器 + embedding/pricing_catalog 目录适配器 + composition 计价闭包注入，与 N-Agent 同语义独立实现） -->
 # 架构与模块边界
 
 ## 架构定位
@@ -32,6 +32,7 @@ N-KB 的目标是提供完整知识库产品能力：文档管理、来源管理
 - Retrieval Workflow：负责 query embedding、过滤条件转换、Qdrant 检索、结果排序和输出转换。
 - RAG Adapter：通过 LlamaIndex 编排文档加载、切分和检索辅助能力，但 LlamaIndex 类型不进入 Domain。
 - Embedding Adapter：通过 Domain `EmbeddingProvider` 端口屏蔽 Ollama+BGE-M3 细节。
+- 模型成本计价（AttemptCost）：单次 embedding 尝试的独立计价子域，与 N-Agent 同语义独立实现、不跨仓导入，语义权威见 `07-observability.md` 模型成本语义章节。Domain 的 `app/domain/cost.py` 定义计价值对象与纯函数 `calculate_attempt_cost`（input 已知桶、output/cache_* 由协议适配器声明 not_applicable、八种受控 unknown 原因固定判定顺序、Decimal 精确）；Infrastructure 的 `app/infrastructure/embedding/pricing_catalog.py` 提供独立版本化价格目录适配器（JCS 内容哈希锁定 + 预期哈希核对 + 精确匹配）；`ollama_provider` 计量先行（成功响应先 `record_tokens` 再解析向量，解析失败保留已知 Token 与费用）；Application 经组合根 `composition.make_embedding_cost_calculator` 注入计价闭包（Infrastructure 不 import Application），`telemetry_semantics` 在 finalization 恰计算一次并投影 Span 属性与 3 个 `nkb.model.cost*` Counter。计价身份取配置原始模型名精确查价，观测模型名白名单归一在后。
 - Vector Index：通过 Domain `VectorIndex` 端口屏蔽 Qdrant collection、payload 和 SDK 细节。
 - Metadata Store：通过 repository 端口屏蔽 SQLite schema 和 SQL 细节。
 - Management FE：服务本地文档上传、列表、详情、标签过滤、索引状态查看和检索验证。

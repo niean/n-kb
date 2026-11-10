@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -21,6 +22,22 @@ from .telemetry_contract import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_PROVIDER_NAME,
     ERROR_TYPE_ATTR,
+    INSTRUMENT_MODEL_COST,
+    INSTRUMENT_MODEL_COST_COMPONENTS,
+    INSTRUMENT_MODEL_COST_ATTEMPTS,
+    NKB_MODEL_COST_STATUS,
+    NKB_MODEL_COST_REASON,
+    NKB_MODEL_COST_CURRENCY,
+    NKB_MODEL_COST_DECIMAL,
+    NKB_MODEL_COST_USD,
+    NKB_MODEL_COST_INPUT_USD,
+    NKB_MODEL_COST_COMPONENT,
+    NKB_MODEL_PRICE_ID,
+    NKB_MODEL_PRICING_VERSION,
+    NKB_MODEL_BILLING_PROVIDER,
+    NKB_MODEL_BILLING_MODEL,
+    COST_BUCKETS,
+    COST_REASONS,
     OUTCOMES,
     ERROR_TYPES,
     OBJECTS,
@@ -152,6 +169,183 @@ def map_model_name(value):
 
 
 _safe_id = safe_id
+
+# ---------------------------------------------------------------------------
+# 成本事实词汇与安全投影（与 Domain cost 契约词汇镜像；本模块不 import 业务
+# 模块，变更须同步 app/domain/cost.py）
+# ---------------------------------------------------------------------------
+
+# 受信计价身份的 provider 侧固定集合（计价目录 billing_provider 词汇 + other）。
+# 计费身份是 env-only 受信配置，不是请求方事实。
+_KNOWN_BILLING_PROVIDERS = frozenset({"ollama"})
+# 八类不可估原因（与 Domain UnknownReason 词汇一致，源出 contract 登记表）
+_KNOWN_COST_REASONS = COST_REASONS
+# 成本分项桶到 Span/Log 金额键的映射（embeddings 只计 input 桶）
+NKB_MODEL_COST_BUCKET_KEYS = MappingProxyType(
+    {"input": NKB_MODEL_COST_INPUT_USD}
+)
+_BILLING_MODEL_MAX_LENGTH = 64
+
+
+def map_billing_provider(provider):
+    return (
+        provider
+        if type(provider) is str and provider in _KNOWN_BILLING_PROVIDERS
+        else "other"
+    )
+
+
+def map_billing_model(model):
+    """受信计费模型名的长度约束投影（不白名单化：目录 billing_model 是
+    env-only 受信开放集合，白名单会把真实计费身份折叠成 other）。控制字符
+    拒绝规则与 contract 的 billing_model 校验一致：Metric 维度不经过
+    valid_attribute，必须在此对齐，避免控制字符进入 Counter 维度。"""
+    if type(model) is not str:
+        return "other"
+    cleaned = model.strip()
+    if not cleaned or len(cleaned) > _BILLING_MODEL_MAX_LENGTH:
+        return "other"
+    if any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        return "other"
+    return cleaned
+
+
+def _finite_nonneg_number(value) -> bool:
+    """金额守卫：真实有限非负 int/float（bool 不是金额），显式 0 合法。"""
+    return (
+        type(value) in (int, float)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _cost_facts_from_result(result) -> dict:
+    """计价结果 -> Span/Log 同键成本事实（不重算成本，只做安全投影）。
+
+    estimated 携带全部金额/分项/decimal/版本/price_id/受信身份；unknown 只
+    携带 status/reason（白名单内）/currency，且保留目录加载成功时的
+    pricing_version（目录失效省略），绝不输出任何金额。非法或未知形态整组
+    省略（延续旧防御行为），观测失败永不破坏业务。
+    """
+    try:
+        if not isinstance(result, dict):
+            return {}
+        status = result.get("status")
+        if status not in ("estimated", "unknown"):
+            return {}
+        facts = {NKB_MODEL_COST_STATUS: status}
+        currency = result.get("currency")
+        facts[NKB_MODEL_COST_CURRENCY] = (
+            currency if type(currency) is str and currency.strip() else "USD"
+        )
+        billing_provider = result.get("billing_provider")
+        if type(billing_provider) is str and billing_provider.strip():
+            facts[NKB_MODEL_BILLING_PROVIDER] = map_billing_provider(billing_provider)
+        billing_model = result.get("billing_model")
+        if type(billing_model) is str and billing_model.strip():
+            facts[NKB_MODEL_BILLING_MODEL] = map_billing_model(billing_model)
+        if status == "unknown":
+            reason = result.get("reason")
+            if type(reason) is str and reason in _KNOWN_COST_REASONS:
+                facts[NKB_MODEL_COST_REASON] = reason
+            version = result.get("pricing_version")
+            if type(version) is str and version.strip():
+                facts[NKB_MODEL_PRICING_VERSION] = version
+            # 唯一命中价格项后的 unknown 保留 price_id 供追溯；未定位到
+            # 价格项的 unknown 该键缺省（组合根不携带即不投影）
+            price_id = result.get("price_id")
+            if type(price_id) is str and price_id.strip():
+                facts[NKB_MODEL_PRICE_ID] = price_id
+            return facts
+        # estimated：核心三键缺一即整组省略（缺有效版本视为无效结果）
+        amount = result.get("amount_usd")
+        version = result.get("pricing_version")
+        if not (type(version) is str and version.strip()):
+            return {}
+        if not _finite_nonneg_number(amount):
+            return {}
+        facts[NKB_MODEL_COST_USD] = float(amount)
+        facts[NKB_MODEL_PRICING_VERSION] = version
+        decimal_str = result.get("cost_decimal")
+        if type(decimal_str) is str and decimal_str.strip():
+            facts[NKB_MODEL_COST_DECIMAL] = decimal_str
+        price_id = result.get("price_id")
+        if type(price_id) is str and price_id.strip():
+            facts[NKB_MODEL_PRICE_ID] = price_id
+        components = result.get("components")
+        if isinstance(components, dict):
+            for bucket in COST_BUCKETS:
+                bucket_key = NKB_MODEL_COST_BUCKET_KEYS.get(bucket)
+                value = components.get(bucket)
+                if bucket_key is not None and _finite_nonneg_number(value):
+                    facts[bucket_key] = float(value)
+        return facts
+    except Exception:
+        return {}
+
+
+def _record_model_cost_metrics(result) -> None:
+    """Record the three cost Counters for one finalized attempt.
+
+    Consumes the RAW estimator result and re-validates internally: Metric
+    recording is unconditional for any dict result with a known status, so a
+    malformed estimated result (missing/blank pricing_version or a
+    non-representable amount) still counts the attempt as ``unknown``
+    (downgrade reason follows T1 order: pricing_unavailable before
+    amount_unrepresentable) while no amount is ever emitted for it. Metric
+    recording is independent of span sampling/recording state; the estimated
+    branch always adds (explicit zero included) and the unknown branch only
+    counts the attempt. Metric dimensions go through the bounded safe
+    mappings; the metric model label goes through the ``map_model_name``
+    whitelist (unknown -> ``other``) to keep counter cardinality bounded,
+    while span/metadata billing identity keeps the raw billing projection
+    (``map_billing_model``). Reason is whitelisted against the fixed
+    eight-value vocabulary (estimated is pinned to ``none``).
+    """
+    try:
+        if not isinstance(result, dict):
+            return
+        status = result.get("status")
+        if status not in ("estimated", "unknown"):
+            return
+        amount = result.get("amount_usd")
+        version = result.get("pricing_version")
+        reason = result.get("reason")
+        downgrade_reason = None
+        if status == "estimated" and not (type(version) is str and version.strip()):
+            status, downgrade_reason = "unknown", "pricing_unavailable"
+        if status == "estimated" and not _finite_nonneg_number(amount):
+            status, downgrade_reason = "unknown", "amount_unrepresentable"
+        dims = {
+            GEN_AI_OPERATION_NAME: EMBEDDINGS_OPERATION,
+            NKB_MODEL_BILLING_PROVIDER: map_billing_provider(result.get("billing_provider")),
+            NKB_MODEL_BILLING_MODEL: map_model_name(result.get("billing_model")),
+        }
+        attempt_dims = dict(dims)
+        attempt_dims[NKB_MODEL_COST_STATUS] = status
+        if status == "estimated":
+            attempt_dims[NKB_MODEL_COST_REASON] = "none"
+        elif downgrade_reason is not None:
+            attempt_dims[NKB_MODEL_COST_REASON] = downgrade_reason
+        elif type(reason) is str and reason in _KNOWN_COST_REASONS:
+            attempt_dims[NKB_MODEL_COST_REASON] = reason
+        _counter_add(INSTRUMENT_MODEL_COST_ATTEMPTS, 1, attempt_dims)
+        if status != "estimated":
+            return
+        if _finite_nonneg_number(amount):
+            _counter_add(INSTRUMENT_MODEL_COST, float(amount), dict(dims))
+        components = result.get("components")
+        if isinstance(components, dict):
+            for bucket in COST_BUCKETS:
+                value = components.get(bucket)
+                if _finite_nonneg_number(value):
+                    _counter_add(
+                        INSTRUMENT_MODEL_COST_COMPONENTS,
+                        float(value),
+                        {**dims, NKB_MODEL_COST_COMPONENT: bucket},
+                    )
+    except Exception:
+        pass
 
 
 def _get_tracer():
@@ -294,6 +488,8 @@ class _OperationState:
     span: object
     attributes: Mapping
     outcome: Optional[str] = None
+    # 原始计价结果（组合根闭包产出）；Metric 出口在收口时消费一次
+    cost_result: Optional[Mapping] = None
 
 
 def configure_completion(callback=None, scope_factory=None):
@@ -353,7 +549,7 @@ def _submit(**attributes):
     safe = contract.project_execution_attributes(attributes)
     merged = MappingProxyType({**state.attributes, **safe})
     _active_operation.set(
-        _OperationState(state.name, state.span, merged, state.outcome)
+        _OperationState(state.name, state.span, merged, state.outcome, state.cost_result)
     )
     for key, value in safe.items():
         _set_attr(state.span, key, value)
@@ -366,7 +562,8 @@ def set_operation_result(outcome):
     if state is not None:
         _active_operation.set(
             _OperationState(
-                state.name, state.span, state.attributes, map_outcome(outcome)
+                state.name, state.span, state.attributes, map_outcome(outcome),
+                state.cost_result,
             )
         )
 
@@ -405,7 +602,7 @@ def _publish_completion(snapshot):
     )
 
 
-def _measure_completion(spec, attrs, seconds):
+def _measure_completion(spec, attrs, seconds, cost_result=None):
     obj, action = spec.object, spec.action
     outcome = attrs[f"nkb.{obj}.outcome"]
     dims = {f"nkb.{obj}.outcome": outcome}
@@ -427,6 +624,11 @@ def _measure_completion(spec, attrs, seconds):
                     GEN_AI_TOKEN_TYPE: TOKEN_TYPE_INPUT,
                 },
             )
+        # 三个成本 Counter：消费收口原始计价结果（内部再校验，畸形
+        # estimated 降级 unknown 仍计 attempts）。Metric 记录不进
+        # sampled/recording 判断；计价闭包缺失时无成本出口。
+        if cost_result is not None:
+            _record_model_cost_metrics(cost_result)
     elif obj == "index" and action in INDEX_STAGES:
         _histogram_record(
             "nkb.index.stage.duration", seconds, {**dims, "nkb.index.stage": action}
@@ -487,6 +689,16 @@ def _finish_operation(spec, span, started, exc):
     )
     if spec.object == "model":
         attrs["nkb.model.usage_known"] = GEN_AI_USAGE_INPUT_TOKENS in attrs
+        # cost_status 派生事实：仅由已提交的成本事实推断，不凭空设置
+        # （计价闭包缺失/失败时保持缺席）
+        if NKB_MODEL_COST_STATUS not in attrs:
+            if any(
+                key in attrs
+                for key in (NKB_MODEL_COST_USD,) + tuple(NKB_MODEL_COST_BUCKET_KEYS.values())
+            ):
+                attrs[NKB_MODEL_COST_STATUS] = "estimated"
+            elif NKB_MODEL_COST_REASON in attrs:
+                attrs[NKB_MODEL_COST_STATUS] = "unknown"
     if outcome in (OUTCOME_FAILURE, OUTCOME_TIMED_OUT):
         try:
             span.set_status(Status(StatusCode.ERROR))
@@ -521,7 +733,10 @@ def _finish_operation(spec, span, started, exc):
     snapshot = CompletionSnapshot(spec.event, attrs, trace_id, span_id)
     _operation_var.set(attrs)
     try:
-        _measure_completion(spec, attrs, elapsed)
+        _measure_completion(
+            spec, attrs, elapsed,
+            state.cost_result if state is not None else None,
+        )
     except Exception:
         pass
     with _completion_scope(snapshot.attributes):
@@ -675,13 +890,27 @@ def record_index(outcome, *, chunk_count=None):
 
 
 class EmbeddingObservationScope:
-    def __init__(self, span, model):
+    def __init__(self, span, model, raw_model=""):
         self._span = span
-        self._model = model
+        self._model = model            # map 后的安全标签（观测展示用）
+        self._raw_model = raw_model    # 原始模型名（计价精确身份承接用）
         self._input_tokens = None
+        self._input_value = None
+        self._input_state = "unknown"  # "known" | "invalid" | "unknown"
 
     def set_input_tokens(self, tokens):
-        self._input_tokens = tokens if type(tokens) is int and tokens >= 0 else None
+        # 缺失（None）与非法（存在但非合法计数）分列承接，避免
+        # invalid_usage 被折叠成 missing_usage；合法值建立 known。
+        self._input_value = tokens
+        if tokens is None:
+            self._input_tokens = None
+            self._input_state = "unknown"
+        elif type(tokens) is int and tokens >= 0:
+            self._input_tokens = tokens
+            self._input_state = "known"
+        else:
+            self._input_tokens = None
+            self._input_state = "invalid"
 
     def set_input(self, inputs):
         try:
@@ -702,9 +931,58 @@ class EmbeddingObservationScope:
         )
 
 
+# 组合根注入的 embeddings 计价闭包（默认 None：无计价出口，不产出成本事实）。
+# 计价只消费受信身份与协议事实：闭包由组合根构造并绑定服务端受信配置
+# （定价目录、billing_provider、billing_model），provider 适配器、请求
+# options 与响应模型不能覆盖。
+_cost_calculator = None
+
+
+def configure_embedding_cost_calculator(calculator=None):
+    """注入/清除 embeddings 计价闭包；非 callable 视为清除。"""
+    global _cost_calculator
+    _cost_calculator = calculator if callable(calculator) else None
+
+
+def _finalize_embedding_cost(scope):
+    """finalization 计价收口：向计价闭包提交协议事实，把原始结果挂到当前
+    操作状态（收口时 Metric 出口消费一次），并把安全投影提交为 Span 与
+    nkb.model.completed 事件事实。观测失败不破坏业务；计价失败同样只降级
+    观测（吞异常，不改业务语义，也不产出部分成本事实）。"""
+    try:
+        calculator = _cost_calculator
+        if not callable(calculator):
+            return
+        result = calculator(
+            {
+                "operation": EMBEDDINGS_OPERATION,
+                "raw_model": scope._raw_model,
+                "input_state": scope._input_state,
+                "input_value": scope._input_value,
+                "input_tokens": scope._input_tokens,
+            }
+        )
+        if not isinstance(result, dict):
+            return
+        state = _active_operation.get()
+        if state is not None and state.cost_result is None:
+            _active_operation.set(
+                _OperationState(
+                    state.name, state.span, state.attributes, state.outcome, result
+                )
+            )
+        facts = _cost_facts_from_result(result)
+        if facts:
+            _submit(**facts)
+    except Exception:
+        pass
+
+
 @contextmanager
 def embedding_observer(model):
-    model = map_model_name(model)
+    raw_model = model if type(model) is str else ""
+    # 观测标签走白名单归一；原始模型名单独保留供计价精确查价
+    model = map_model_name(raw_model)
     with _operation_span(
         EMBEDDINGS_OPERATION,
         SpanKind.CLIENT,
@@ -714,12 +992,13 @@ def embedding_observer(model):
             (GEN_AI_PROVIDER_NAME, "ollama"),
         ),
     ) as span:
-        scope = EmbeddingObservationScope(span, model)
+        scope = EmbeddingObservationScope(span, model, raw_model)
         try:
             yield scope
         finally:
             if scope._input_tokens is not None:
                 _submit(**{GEN_AI_USAGE_INPUT_TOKENS: scope._input_tokens})
+            _finalize_embedding_cost(scope)
 
 
 # Internal compatibility imports only; these templates are never emitted.

@@ -12,6 +12,37 @@ GEN_AI_TOKEN_TYPE = "gen_ai.token.type"
 GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
 ERROR_TYPE_ATTR = "error.type"
+# 成本事实键（T5 KB 管线输入，键名一经定稿不得改动）
+NKB_MODEL_COST_STATUS = "nkb.model.cost_status"
+NKB_MODEL_COST_REASON = "nkb.model.cost_reason"
+NKB_MODEL_COST_CURRENCY = "nkb.model.cost_currency"
+NKB_MODEL_COST_DECIMAL = "nkb.model.cost_decimal"
+NKB_MODEL_COST_USD = "nkb.model.cost_usd"
+NKB_MODEL_COST_INPUT_USD = "nkb.model.cost_input_usd"
+NKB_MODEL_COST_COMPONENT = "nkb.model.cost_component"
+NKB_MODEL_PRICE_ID = "nkb.model.price_id"
+NKB_MODEL_PRICING_VERSION = "nkb.model.pricing_version"
+NKB_MODEL_BILLING_PROVIDER = "nkb.model.billing_provider"
+NKB_MODEL_BILLING_MODEL = "nkb.model.billing_model"
+# 成本 Counter（单位 USD / USD / {attempt}）
+INSTRUMENT_MODEL_COST = "nkb.model.cost"
+INSTRUMENT_MODEL_COST_COMPONENTS = "nkb.model.cost_components"
+INSTRUMENT_MODEL_COST_ATTEMPTS = "nkb.model.cost_attempts"
+# 成本判定状态、八类不可估原因（与 Domain UnknownReason 词汇一致）与分项桶词汇
+COST_STATUSES = frozenset(("estimated", "unknown"))
+COST_REASONS = frozenset(
+    (
+        "missing_usage",
+        "invalid_usage",
+        "price_not_found",
+        "price_ambiguous",
+        "unsupported_pricing",
+        "identity_unresolved",
+        "pricing_unavailable",
+        "amount_unrepresentable",
+    )
+)
+COST_BUCKETS = frozenset(("input", "output", "cache_read", "cache_write"))
 OUTCOMES = frozenset(
     (
         "success",
@@ -84,6 +115,13 @@ DIAGNOSTICS = frozenset(
 )
 ID_PATTERN = re.compile(r"[\w.:/-]+")
 MODEL_PATTERN = re.compile(r"[\w.:/@_-]+")
+# 成本十进制金额字符串：规范非指数十进制（无符号、无指数、无冗余尾零），
+# 整数位与小数位各 340 位，与 Domain 投影上限（COST_DECIMAL_MAX_SIDE_DIGITS）
+# 和 Collector 护栏一致；超界金额在 Domain 按 amount_unrepresentable 收口，
+# 不会到达本契约
+COST_DECIMAL_PATTERN = re.compile(r"\d{1,340}(?:\.\d{1,340})?")
+# pricing_version / price_id 的有界开放集合（受信配置词汇，不做白名单收窄）
+PRICING_ID_PATTERN = re.compile(r"[\w.:/@+-]+")
 
 
 @dataclass(frozen=True)
@@ -163,6 +201,16 @@ ATTRIBUTES = MappingProxyType(
         "nkb.retrieval.filter_document_status": "presence",
         "nkb.retrieval.filter_min_score": "presence",
         "nkb.model.usage_known": "bool",
+        NKB_MODEL_COST_STATUS: "cost_status",
+        NKB_MODEL_COST_REASON: "cost_reason",
+        NKB_MODEL_COST_CURRENCY: "cost_currency",
+        NKB_MODEL_COST_USD: "number",
+        NKB_MODEL_COST_INPUT_USD: "number",
+        NKB_MODEL_COST_DECIMAL: "decimal",
+        NKB_MODEL_PRICING_VERSION: "pricing_version",
+        NKB_MODEL_PRICE_ID: "price_id",
+        NKB_MODEL_BILLING_PROVIDER: "billing_provider",
+        NKB_MODEL_BILLING_MODEL: "billing_model",
         "nkb.http.direction": "direction",
         "nkb.http.caller": "caller",
         "nkb.observation.error": "diagnostic",
@@ -216,6 +264,28 @@ def valid_attribute(key, value):
             return math.isfinite(value)
         except OverflowError:
             return False
+    if kind == "decimal":
+        # 成本十进制金额字符串：非负、有限、逐侧有界（681 = 340 + "." + 340）
+        if type(value) is not str or not value or len(value) > 681:
+            return False
+        return COST_DECIMAL_PATTERN.fullmatch(value) is not None
+    if kind == "pricing_version":
+        return (
+            type(value) is str
+            and 0 < len(value) <= 129
+            and PRICING_ID_PATTERN.fullmatch(value) is not None
+        )
+    if kind == "price_id":
+        return (
+            type(value) is str
+            and 0 < len(value) <= 128
+            and PRICING_ID_PATTERN.fullmatch(value) is not None
+        )
+    if kind == "billing_model":
+        # 受信计费模型名：有界开放集合（不白名单化），拒绝控制字符
+        if type(value) is not str or not 0 < len(value) <= 64:
+            return False
+        return not any(ord(char) < 32 or ord(char) == 127 for char in value)
     if type(value) is not str:
         return False
     if kind == "id":
@@ -245,6 +315,10 @@ def valid_attribute(key, value):
         "provider": ("ollama",),
         "token_type": ("input",),
         "error": ERROR_TYPES,
+        "cost_status": COST_STATUSES,
+        "cost_reason": COST_REASONS | {"none"},
+        "cost_currency": ("USD",),
+        "billing_provider": ("ollama", "other"),
     }
     return value in enum.get(kind, ())
 
@@ -388,6 +462,35 @@ INSTRUMENTS: Mapping[str, InstrumentSpec] = MappingProxyType(
         ),
         INSTRUMENT_RETRIEVAL_DURATION: InstrumentSpec(
             "histogram", "s", NKB_DURATION_BOUNDARIES, ("nkb.retrieval.outcome",)
+        ),
+        INSTRUMENT_MODEL_COST: InstrumentSpec(
+            "counter",
+            "USD",
+            (),
+            (GEN_AI_OPERATION_NAME, NKB_MODEL_BILLING_PROVIDER, NKB_MODEL_BILLING_MODEL),
+        ),
+        INSTRUMENT_MODEL_COST_COMPONENTS: InstrumentSpec(
+            "counter",
+            "USD",
+            (),
+            (
+                GEN_AI_OPERATION_NAME,
+                NKB_MODEL_BILLING_PROVIDER,
+                NKB_MODEL_BILLING_MODEL,
+                NKB_MODEL_COST_COMPONENT,
+            ),
+        ),
+        INSTRUMENT_MODEL_COST_ATTEMPTS: InstrumentSpec(
+            "counter",
+            "{attempt}",
+            (),
+            (
+                GEN_AI_OPERATION_NAME,
+                NKB_MODEL_BILLING_PROVIDER,
+                NKB_MODEL_BILLING_MODEL,
+                NKB_MODEL_COST_STATUS,
+                NKB_MODEL_COST_REASON,
+            ),
         ),
     }
 )

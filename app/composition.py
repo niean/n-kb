@@ -106,6 +106,117 @@ def build_services(
 # ---------------------------------------------------------------------------
 
 
+def make_embedding_cost_calculator(settings: Settings) -> Any:
+    """构造 embeddings 计价闭包（组合根持有受信身份与定价目录）。
+
+    计价身份来自服务端受信配置（billing_provider 固定 ollama，billing_model
+    取 settings.embedding_model 原始名），provider 适配器、请求 options 与
+    响应模型不能覆盖。目录在启动期加载一次：未配置或失效时闭包仍可用，
+    resolve 内部降级为 unavailable，成本按 pricing_unavailable 处理；无法
+    从文本长度/chunk 数/向量维度估算 Token。输入是 Application 层承接的
+    协议事实 dict（input_state: known/invalid/unknown），输出是观测结果
+    dict（estimated 携带金额分项，unknown 携带八类原因之一），形态与
+    Domain AttemptCost 契约一致。
+    """
+    from app.domain.cost import (
+        AttemptUsage,
+        TokenValue,
+        calculate_attempt_cost,
+        canonical_decimal_string,
+    )
+    from app.infrastructure.embedding.pricing_catalog import JsonPricingCatalog
+
+    pricing_catalog = JsonPricingCatalog.load(
+        settings.pricing_catalog_path, settings.pricing_catalog_expected_sha256
+    )
+    identity = ("ollama", settings.embedding_model)
+
+    def _result(
+        *,
+        status,
+        reason=None,
+        pricing_version=None,
+        price_id=None,
+        amount_usd=0.0,
+        cost_decimal=None,
+        components=None,
+    ) -> dict:
+        return {
+            "status": status,
+            "amount_usd": amount_usd,
+            "pricing_version": pricing_version,
+            "price_id": price_id,
+            "cost_decimal": cost_decimal,
+            "components": components,
+            "currency": "USD",
+            "reason": reason,
+            "billing_provider": identity[0],
+            "billing_model": identity[1],
+        }
+
+    def calculate(facts: Any) -> Any:
+        if not isinstance(facts, dict):
+            return None
+        state = facts.get("input_state")
+        value = facts.get("input_value")
+        # embeddings 无 output/cache 桶概念，声明 not_applicable（不输出
+        # 虚构 0 Token）；input 桶按协议事实承接：缺失 unknown，存在但
+        # 非法原样携带（Domain 计算器判 invalid_usage）。
+        if state == "known" and type(value) is int and value >= 0:
+            input_value = TokenValue.known(value)
+        elif state == "invalid":
+            input_value = TokenValue.known(value if value is not None else True)
+        else:
+            input_value = TokenValue.unknown()
+        usage = AttemptUsage(
+            buckets={
+                "input": input_value,
+                "output": TokenValue.not_applicable(),
+                "cache_read": TokenValue.not_applicable(),
+                "cache_write": TokenValue.not_applicable(),
+            }
+        )
+        resolution = pricing_catalog.resolve(identity, "embeddings")
+        cost = calculate_attempt_cost(usage, identity, resolution)
+        if cost.status != "estimated":
+            # 目录加载成功的 unknown 保留版本；目录失效（版本 None）省略。
+            # 唯一命中价格项后的 unknown 保留 price_id（spec：追溯要求），
+            # 未定位价格项的 unknown 该值为 None（组合根不携带即不投影）。
+            return _result(
+                status="unknown",
+                reason=cost.reason.value,
+                pricing_version=cost.pricing_version or pricing_catalog.pricing_version,
+                price_id=cost.price_id,
+            )
+        return _result(
+            status="estimated",
+            amount_usd=float(cost.amount_usd),
+            pricing_version=cost.pricing_version,
+            price_id=cost.price_id,
+            cost_decimal=canonical_decimal_string(cost.amount_usd),
+            components={bucket: float(item) for bucket, item in cost.components.items()},
+        )
+
+    return calculate
+
+
+def _configure_embedding_cost_calculator(settings: Settings, handle: Any) -> None:
+    """观测启用时装配计价闭包；停机回调清除，避免跨实例泄漏。"""
+    import app.application.telemetry_semantics as telemetry_semantics
+
+    try:
+        telemetry_semantics.configure_embedding_cost_calculator(
+            make_embedding_cost_calculator(settings)
+        )
+        if handle is not None:
+            handle.register_stop_callback(
+                lambda: telemetry_semantics.configure_embedding_cost_calculator()
+            )
+    except Exception:
+        # 计价装配失败只降级观测（成本事实缺席），不阻断业务启动
+        telemetry_semantics.configure_embedding_cost_calculator()
+
+
 def _start_profiler(handle: Any, settings: Settings) -> None:
     """创建并启动 Profile 采样器（缺 py-spy 是有界 degraded，不是失败）。
 
@@ -329,6 +440,8 @@ def _start_observability(settings: Settings) -> Optional[Any]:
     )
     if handle is None or active is not None or not handle.is_published:
         return handle
+    # 成本计价闭包：观测启用才装配（计价结果只服务于观测出口）
+    _configure_embedding_cost_calculator(settings, handle)
     bind_details(
         configure=telemetry_details.configure_details,
         project=telemetry_details.project_details,

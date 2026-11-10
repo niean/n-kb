@@ -1,4 +1,5 @@
 import math
+import re
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -58,6 +59,23 @@ class Settings(BaseSettings):
     profiling_enabled: bool = False
     profiling_pyroscope_endpoint: str = ""
     profiling_interval_seconds: int = 60
+
+    # 定价目录配置（B 类启动期 env-only，无运行时修改接口）。
+    # 目录 JSON 路径；为空表示成本目录不可用（成本按 pricing_unavailable 处理）
+    pricing_catalog_path: str = ""
+    # 目录内容的预期 SHA-256（64 位十六进制小写，与目录 JCS 规范化内容核对）；
+    # 为空按目录不可用处理
+    pricing_catalog_expected_sha256: str = ""
+
+    @field_validator("pricing_catalog_expected_sha256")
+    @classmethod
+    def validate_pricing_catalog_expected_sha256(cls, value: str) -> str:
+        # 非空时必须是 64 位十六进制小写（与目录内容的 SHA-256 核对格式一致）
+        if value != "" and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError(
+                "pricing_catalog_expected_sha256 must be 64 lowercase hex chars"
+            )
+        return value
 
     @field_validator("allowed_file_extensions", mode="before")
     @classmethod

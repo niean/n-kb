@@ -26,7 +26,7 @@ def test_contract_is_explicit_immutable_and_strict():
         )
     )
     assert len(c.CONTENT_FIELDS) == 11
-    assert len(c.INSTRUMENTS) == 13
+    assert len(c.INSTRUMENTS) == 16
     assert c.INSTRUMENTS["nkb.retrieval.results"].boundaries[0] == 0
     with pytest.raises(TypeError):
         c.OPERATIONS["bad"] = None
@@ -263,7 +263,7 @@ def test_nested_concurrent_children_restore_facts_and_details():
         details.configure_details(None)
 
 
-def test_all_thirteen_instruments_match_preserved_contract():
+def test_all_sixteen_instruments_match_preserved_contract():
     from app.application import telemetry_contract as c
 
     duration = (0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
@@ -358,6 +358,35 @@ def test_all_thirteen_instruments_match_preserved_contract():
             "{token}",
             token,
             ("gen_ai.operation.name", "gen_ai.request.model", "gen_ai.token.type"),
+        ),
+        "nkb.model.cost": (
+            "counter",
+            "USD",
+            (),
+            ("gen_ai.operation.name", "nkb.model.billing_provider", "nkb.model.billing_model"),
+        ),
+        "nkb.model.cost_components": (
+            "counter",
+            "USD",
+            (),
+            (
+                "gen_ai.operation.name",
+                "nkb.model.billing_provider",
+                "nkb.model.billing_model",
+                "nkb.model.cost_component",
+            ),
+        ),
+        "nkb.model.cost_attempts": (
+            "counter",
+            "{attempt}",
+            (),
+            (
+                "gen_ai.operation.name",
+                "nkb.model.billing_provider",
+                "nkb.model.billing_model",
+                "nkb.model.cost_status",
+                "nkb.model.cost_reason",
+            ),
         ),
     }
     assert {
@@ -600,3 +629,115 @@ def test_unknown_nested_scope_cannot_mutate_parent_result():
         assert "nkb.retrieval.result_count" not in snapshots[0].attributes
     finally:
         ts.configure_completion(None)
+
+
+# ---------------------------------------------------------------------------
+# T6: 成本属性合同登记（键名是 T5 KB 管线输入，不得漂移）
+# ---------------------------------------------------------------------------
+
+
+def test_cost_attribute_names_are_locked():
+    from app.application import telemetry_contract as c
+
+    assert c.NKB_MODEL_COST_STATUS == "nkb.model.cost_status"
+    assert c.NKB_MODEL_COST_REASON == "nkb.model.cost_reason"
+    assert c.NKB_MODEL_COST_CURRENCY == "nkb.model.cost_currency"
+    assert c.NKB_MODEL_COST_USD == "nkb.model.cost_usd"
+    assert c.NKB_MODEL_COST_DECIMAL == "nkb.model.cost_decimal"
+    assert c.NKB_MODEL_COST_INPUT_USD == "nkb.model.cost_input_usd"
+    assert c.NKB_MODEL_PRICING_VERSION == "nkb.model.pricing_version"
+    assert c.NKB_MODEL_PRICE_ID == "nkb.model.price_id"
+    assert c.NKB_MODEL_BILLING_PROVIDER == "nkb.model.billing_provider"
+    assert c.NKB_MODEL_BILLING_MODEL == "nkb.model.billing_model"
+    assert c.INSTRUMENT_MODEL_COST == "nkb.model.cost"
+    assert c.INSTRUMENT_MODEL_COST_COMPONENTS == "nkb.model.cost_components"
+    assert c.INSTRUMENT_MODEL_COST_ATTEMPTS == "nkb.model.cost_attempts"
+
+
+def test_cost_attribute_kinds_and_validation():
+    from app.application import telemetry_contract as c
+
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_STATUS] == "cost_status"
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_REASON] == "cost_reason"
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_CURRENCY] == "cost_currency"
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_USD] == "number"
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_INPUT_USD] == "number"
+    assert c.ATTRIBUTES[c.NKB_MODEL_COST_DECIMAL] == "decimal"
+    assert c.ATTRIBUTES[c.NKB_MODEL_PRICING_VERSION] == "pricing_version"
+    assert c.ATTRIBUTES[c.NKB_MODEL_PRICE_ID] == "price_id"
+    assert c.ATTRIBUTES[c.NKB_MODEL_BILLING_PROVIDER] == "billing_provider"
+    assert c.ATTRIBUTES[c.NKB_MODEL_BILLING_MODEL] == "billing_model"
+
+    assert c.valid_attribute(c.NKB_MODEL_COST_STATUS, "estimated")
+    assert c.valid_attribute(c.NKB_MODEL_COST_STATUS, "unknown")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_STATUS, "other")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_STATUS, True)
+
+    for reason in (
+        "missing_usage",
+        "invalid_usage",
+        "price_not_found",
+        "price_ambiguous",
+        "unsupported_pricing",
+        "identity_unresolved",
+        "pricing_unavailable",
+        "amount_unrepresentable",
+        "none",
+    ):
+        assert c.valid_attribute(c.NKB_MODEL_COST_REASON, reason), reason
+    assert not c.valid_attribute(c.NKB_MODEL_COST_REASON, "other")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_REASON, "missing")
+
+    assert c.valid_attribute(c.NKB_MODEL_COST_CURRENCY, "USD")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_CURRENCY, "EUR")
+
+    assert c.valid_attribute(c.NKB_MODEL_COST_USD, 0.00002)
+    assert c.valid_attribute(c.NKB_MODEL_COST_USD, 0)
+    assert not c.valid_attribute(c.NKB_MODEL_COST_USD, -1)
+    assert not c.valid_attribute(c.NKB_MODEL_COST_USD, float("nan"))
+    assert not c.valid_attribute(c.NKB_MODEL_COST_USD, True)
+
+    assert c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "0.00002")
+    assert c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "0")
+    # 规范非指数十进制，逐侧 340 位（与 Domain 投影上限、Collector 护栏一致）
+    assert c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "0." + "0" * 75 + "1")
+    assert c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "1" * 340)
+    assert c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "9" * 340 + "." + "3" * 340)
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "1" * 341)
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "0." + "0" * 340 + "1")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "1e400abc")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "1e-5")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, ".5")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "-1")
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, 0.5)
+    assert not c.valid_attribute(c.NKB_MODEL_COST_DECIMAL, "x" * 65)
+
+    assert c.valid_attribute(c.NKB_MODEL_PRICING_VERSION, "2026-11-09-init@" + "a" * 64)
+    assert not c.valid_attribute(c.NKB_MODEL_PRICING_VERSION, "")
+    assert not c.valid_attribute(c.NKB_MODEL_PRICING_VERSION, "v" * 130)
+
+    assert c.valid_attribute(c.NKB_MODEL_PRICE_ID, "price-1")
+    assert not c.valid_attribute(c.NKB_MODEL_PRICE_ID, "")
+    assert not c.valid_attribute(c.NKB_MODEL_PRICE_ID, "p" * 129)
+
+    assert c.valid_attribute(c.NKB_MODEL_BILLING_PROVIDER, "ollama")
+    assert c.valid_attribute(c.NKB_MODEL_BILLING_PROVIDER, "other")
+    assert not c.valid_attribute(c.NKB_MODEL_BILLING_PROVIDER, "openai")
+
+    assert c.valid_attribute(c.NKB_MODEL_BILLING_MODEL, "bge-m3")
+    assert not c.valid_attribute(c.NKB_MODEL_BILLING_MODEL, "")
+    assert not c.valid_attribute(c.NKB_MODEL_BILLING_MODEL, "m" * 65)
+
+    assert c.project_attributes(
+        {
+            c.NKB_MODEL_COST_STATUS: "estimated",
+            c.NKB_MODEL_COST_USD: 0.00002,
+            c.NKB_MODEL_COST_DECIMAL: "0.00002",
+            c.NKB_MODEL_BILLING_MODEL: "bge-m3",
+        }
+    ) == {
+        c.NKB_MODEL_COST_STATUS: "estimated",
+        c.NKB_MODEL_COST_USD: 0.00002,
+        c.NKB_MODEL_COST_DECIMAL: "0.00002",
+        c.NKB_MODEL_BILLING_MODEL: "bge-m3",
+    }

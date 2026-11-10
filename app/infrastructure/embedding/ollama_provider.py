@@ -10,7 +10,8 @@ from app.domain.embedding import EmbeddingVector
 
 # observer scope 合同（Application 层 telemetry_semantics.embedding_observer
 # 经组合根注入）：factory(model) 返回支持 __enter__/__exit__ 的 scope，
-# scope 提供 set_input_tokens(int | None)。默认 None 表示无观测。
+# scope 提供 set_input_tokens(tokens)：None 视为缺失（unknown），非负 int
+# 建立 known，存在但非法原样承接并由 scope 判 invalid。默认 None 表示无观测。
 EmbeddingObserverFactory = Callable[[str], AbstractContextManager]
 
 
@@ -80,11 +81,13 @@ class OllamaEmbeddingProvider:
         with self._observe() as (record_tokens, record_input, record_result):
             record_input(inputs)
             data = self._request_embed(inputs)
-            embeddings = self._parse_embeddings(data, expected_count=len(inputs))
-            # 成功解析后再填 token；缺失传 None，零 token 记 0。
+            # HTTP 成功后先承接计量事实再解析向量：向量解析失败时保留已知
+            # Token 与可计算费用。字段缺失（含 None）传 None（unknown），
+            # 存在但非法原样透传（由观测侧区分 invalid，不折叠成 missing）。
             record_tokens(
                 data.get("prompt_eval_count") if isinstance(data, dict) else None
             )
+            embeddings = self._parse_embeddings(data, expected_count=len(inputs))
             record_result(len(embeddings),sorted({len(values) for values in embeddings}))
             return embeddings
 

@@ -44,6 +44,10 @@ services:
       N_KB_MCP_ALLOWED_HOSTS: ${N_KB_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,nkb.localhost,nkb.localhost:*,n-kb,n-kb:*}
       N_KB_MCP_ALLOWED_ORIGINS: ${N_KB_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*,http://[::1]:*,http://nkb.localhost,http://nkb.localhost:*,http://n-kb,http://n-kb:*}
       N_KB_OTEL_ENABLED: ${N_KB_OTEL_ENABLED:-false}
+      # 定价目录（B 类启动期 env-only）：只读挂载仓库自带目录，内容哈希
+      # 与 JCS 规范化内容核对；为空或不挂载时成本按 pricing_unavailable 处理
+      N_KB_PRICING_CATALOG_PATH: /etc/n-kb/model-pricing.json
+      N_KB_PRICING_CATALOG_EXPECTED_SHA256: "3f31783a1b457ce213b8482a23243dbfd00e16e8ed7ff9086ca600d2be1ec19f"
       N_KB_OTEL_TRACES_SAMPLE_RATIO: ${N_KB_OTEL_TRACES_SAMPLE_RATIO:-1.0}
       N_KB_OTEL_CONTENT_MAX_BYTES: ${N_KB_OTEL_CONTENT_MAX_BYTES:-1024000}
       N_KB_OTEL_GRAFANA_BASE_URL: ${N_KB_OTEL_GRAFANA_BASE_URL:-}
@@ -56,6 +60,8 @@ services:
     volumes:
       - ../locals:/app/locals
       - ../data:/app/data
+      # 定价目录只读挂载（与 N-Agent 使用同一份目录文件与内容哈希）
+      - ./observability/model-pricing.json:/etc/n-kb/model-pricing.json:ro
     # 观测导出为后台批处理，停机时给 flush 留出时间；基础样例与观测组合均不低于 10 秒。
     stop_grace_period: 15s
     cpus: 1
