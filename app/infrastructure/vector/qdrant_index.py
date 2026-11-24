@@ -234,6 +234,7 @@ class QdrantVectorIndex:
                     },
                     tags=dict(payload.get("tags") or {}),
                     metadata=dict(payload.get("metadata") or {"ordinal": payload.get("ordinal")}),
+                    chunk_content_hash=payload.get("content_hash"),
                 )
             )
         return results

@@ -45,7 +45,8 @@ Trace 表示执行过程和父子关系；完成 Log/Event 表示同一次结束
 | request | nkb.request.channel / id | api/mcp_http/mcp_stdio/unknown；ID 无真实受信来源时省略，此次未新增请求 ID 协议 |
 | http | nkb.http.direction / caller | server/client；受控调用位置枚举 ollama.embed、qdrant.request、health.check、http.request、unknown |
 | HTTP 标准 | http.request.method / response.status_code / route、server.address / port、url.template | 实际方法、实际状态、模板及安全对端信息；无响应不补码，拒绝 bool 状态码与非法端口 |
-| DB/兼容标准 | db.system / system.name / operation / collection.name 等锁定自动埋点字段 | 精确白名单；SQL 只投影表名，不记录 SQL/参数 |
+| DB/兼容标准 | db.system / system.name / operation / collection.name 等锁定自动埋点字段 | 精确白名单；SQL 不记录原文与参数，statement/query.text 只投影表名（db.collection.name）与脱敏查询概要（db.query.summary：字符串字面量替换为 ``?``、折叠空白、限长 512） |
+| DB 返回概要 | db.rows_affected / db.returned_columns | DML 受影响行数（rowcount 非负 int，SELECT/DDL 为 -1 省略）；SELECT 返回列名逗号概要（execute 时可得，限长 512；行数须 fetch 后才知而 span 已结束，不伪造） |
 | 错误 | error.type | unsupported_file_type/file_too_large/embedding_failed/vector_index_failed/sqlite_failed/timeout/other；取消不写技术错误 |
 | observation / metric | nkb.observation.error / nkb.metric.overflow | 固定安全诊断枚举 / bool，非正文和业务 ID |
 | content | nkb.content.<field> 及四项后缀 | 见内容出口，只能经过脱敏有界详情通道 |
@@ -141,7 +142,7 @@ Metric、Profile、自检 Span/log ring 不带正文、详情或异常文本，�
 
 观测创建、属性写入、异常格式化、详情回调和导出故障均隔离，不改变业务返回、原异常、取消或数据流消费。初始化与最后引用释放幂等，关闭时恢复回调与清理缓冲；沿用有界队列、基数、重试和共用五秒 flush/shutdown 预算。禁用不装 SDK。Trace 使用 ParentBased 比例采样；Log/Metric 不随 Trace 未采样丢弃。Profile 先停止再释放观测句柄。
 
-FastAPI SERVER 白名单沿有效路由树遍历，保留 include_router 嵌套 prefix/method，兼容公开 iter_route_contexts、effective_route_contexts 与早期平铺版本；过滤健康、静态、自检噪声，HTTPX/SQLite 仅在有效父级内创建 CLIENT。SQLite cursor 拦截与 HTTP 传输分开，不因同为 CLIENT 就认作 HTTP。没有 SERVER 时应先检查白名单与版本，不能直接认定上游没有 traceparent。
+FastAPI SERVER 白名单沿有效路由树遍历，保留 include_router 嵌套 prefix/method，兼容公开 iter_route_contexts、effective_route_contexts 与早期平铺版本；过滤健康、静态、自检噪声，HTTPX/SQLite 仅在有效父级内创建 CLIENT。SQLite cursor 拦截与 HTTP 传输分开，不因同为 CLIENT 就认作 HTTP。SQLite 自动埋点在 wrap_connect 之前叠加内层连接/游标薄代理（instrumentors `_KBSQLite*Proxy`），使 DML 受影响行数与 SELECT 返回列名在 execute 返回、DB CLIENT span 结束前的窗口内写入；属性仍走同一精确白名单。没有 SERVER 时应先检查白名单与版本，不能直接认定上游没有 traceparent。
 
 ## 自检、外链与共享展示
 

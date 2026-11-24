@@ -11,6 +11,13 @@ class DocumentRepository(Protocol):
 
     def get_document(self, document_id: str) -> Document | None: ...
 
+    def get_documents_by_ids(self, document_ids: list[str]) -> list[Document]:
+        """按 ID 批量查询文档。
+
+        返回命中的文档列表，缺失的 ID 不出现在结果中；实现方负责去重，
+        并将单条 IN 语句的参数量约束在实现定义的安全上界内（分批执行）。
+        """
+
     def find_by_content_hash(self, content_hash: str) -> Document | None: ...
 
     def get_content(self, document_id: str) -> DocumentContent | None: ...

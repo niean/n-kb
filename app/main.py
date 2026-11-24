@@ -1,6 +1,10 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+import asyncio
+import logging
+import sqlite3
 import sys
+import threading
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +23,48 @@ from app.interfaces.mcp.server import create_mcp_app, create_mcp_status_endpoint
 
 SERVICE_KEYS = ("documents", "ingestion", "index_jobs", "retrieval", "health")
 
+# 外部清理恢复调度周期（启动期先同步调用一次，此后周期兜底）；
+# 常量模块级固定，不做配置面
+_EVALUATION_CLEANUP_RETRY_INTERVAL_SECONDS = 60.0
+
 _MCP_STATE_ATTR = "mcp_asgi_app"
+
+logger = logging.getLogger(__name__)
+
+
+def _log_worker_death(task: asyncio.Task) -> None:
+    """投递循环死亡必须可见：_claim_due 对非 busy 存储故障快速失败终止
+    run()，应用继续服务但投递已停。只记异常类型名，不含正文/凭据。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("evaluation delivery worker died type=%s", type(exc).__name__)
+
+
+def _warmup_embedding(provider) -> None:
+    """启动期后台预热：一次最小 embed 请求触发 Ollama 模型加载，把冷加载
+    窗口从首个真实请求挪到应用启动期。失败静默（Ollama 未就绪时留给首个
+    真实请求，读超时已覆盖冷加载窗口）。"""
+    try:
+        provider.embed_query("n-kb embedding warmup")
+    except Exception:
+        pass
+
+
+async def _cleanup_retry_loop(document_service) -> None:
+    """评估删除的外部清理周期兜底调度。
+
+    启动期已在 lifespan 内同步执行一次恢复；本循环只做周期兜底（外部资源
+    清理最终一致，失败留待下次），随取消退出，不作为业务异常出口。
+    """
+    while True:
+        await asyncio.sleep(_EVALUATION_CLEANUP_RETRY_INTERVAL_SECONDS)
+        try:
+            document_service.retry_pending_cleanups()
+        except Exception:
+            # 单轮失败不终止调度（与恢复入口的逐行 busy 自愈口径一致）
+            logger.warning("evaluation cleanup retry sweep failed")
 
 
 class _LifespanMountedApp:
@@ -68,6 +113,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_settings, handle
         )
         session_cm = None
+        cleanup_task = None
+        services = None
         try:
             # 2. global instrumentors/logging 已在 start_observability 中就绪，
             #    此刻才创建业务 client/connection（build_services）。
@@ -79,7 +126,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 key: getattr(services, key) for key in SERVICE_KEYS
             }
             fastapi_app.state.observability_handle = handle
-            # 3. MCP 服务构造 + session manager（T8 的快照 callable 注入点）。
+            # 3. 评估采集：启动期恢复一次（扫描 cleanup_pending=1 控制行重试
+            #    外部清理，remote_acked 且清理完成才删控制行），再登记周期
+            #    兜底调度；恢复逻辑在 lifespan 而非删除路径。读侧 busy 突发
+            #    不中止应用启动，交给周期兜底调度下次再试。
+            try:
+                services.documents.retry_pending_cleanups()
+            except sqlite3.OperationalError:
+                logger.warning("evaluation startup recovery deferred (store busy)")
+            cleanup_task = asyncio.create_task(
+                _cleanup_retry_loop(services.documents)
+            )
+            # embedding 模型预热（后台线程，不阻塞启动；keep_alive 默认 -1
+            # 常驻后仅启动期加载一次）。
+            if services.embedding_provider is not None:
+                threading.Thread(
+                    target=_warmup_embedding,
+                    args=(services.embedding_provider,),
+                    name="nkb-embedding-warmup",
+                    daemon=True,
+                ).start()
+            # endpoint 或 token 缺失时不启动网络投递循环（本地捕获/清理照常）。
+            if services.delivery_worker is not None:
+                worker_task = asyncio.create_task(services.delivery_worker.run())
+                worker_task.add_done_callback(_log_worker_death)
+            # 4. MCP 服务构造 + session manager（T8 的快照 callable 注入点）。
             if resolved_settings.mcp_enabled:
                 mcp_server, mcp_asgi_app = create_mcp_app(
                     services.health,
@@ -92,28 +163,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pending_cm = mcp_server.session_manager.run()
                 await pending_cm.__aenter__()
                 session_cm = pending_cm
-            # 4. 服务请求。
+            # 5. 服务请求。
             yield
         finally:
-            # 先结束业务/session，再 release（观测运行时最后关闭）。
-            # release 必须无条件执行（即使 session 关闭出错），且其自身
-            # 故障不掩盖 session 关闭错误。
+            # 先停评估投递：worker.close 最多等在途请求 15s（停止领取后取消
+            # 任务，未确认行保留），再回收组合根持有的投递客户端；随后停恢复
+            # 调度，再结束业务/session，最后 release（观测运行时最后关闭）。
+            # 各段关闭互不掩盖，release/session 必须无条件执行。
             try:
-                if session_cm is not None:
-                    await session_cm.__aexit__(None, None, None)
+                if services is not None and services.delivery_worker is not None:
+                    await services.delivery_worker.close(15)
+                    if services.delivery_client is not None:
+                        await services.delivery_client.aclose()
             finally:
-                if handle is not None:
-                    try:
-                        handle.release()
-                    except Exception:
+                if cleanup_task is not None:
+                    cleanup_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await cleanup_task
+                # 先结束业务/session，再 release（观测运行时最后关闭）。
+                # release 必须无条件执行（即使 session 关闭出错），且其自身
+                # 故障不掩盖 session 关闭错误。
+                try:
+                    if session_cm is not None:
+                        await session_cm.__aexit__(None, None, None)
+                finally:
+                    if handle is not None:
                         try:
-                            sys.stderr.write(
-                                "n-kb: observability handle release failed "
-                                "during lifespan shutdown\n"
-                            )
-                            sys.stderr.flush()
+                            handle.release()
                         except Exception:
-                            pass
+                            try:
+                                sys.stderr.write(
+                                    "n-kb: observability handle release failed "
+                                    "during lifespan shutdown\n"
+                                )
+                                sys.stderr.flush()
+                            except Exception:
+                                pass
 
     fastapi_app = FastAPI(title="N-KB", lifespan=lifespan)
     fastapi_app.state.settings = resolved_settings

@@ -26,7 +26,8 @@ def test_embed_chunks_posts_batch_and_preserves_chunk_ids():
     def handler(request):
         requests.append(request)
         assert request.url.path == "/api/embed"
-        assert request.read() == b'{"model":"bge-m3","input":["hello","world"]}'
+        # keep_alive=-1：模型常驻，消除 Ollama 默认 5 分钟卸载后的冷加载
+        assert request.read() == b'{"model":"bge-m3","input":["hello","world"],"keep_alive":"-1"}'
         return httpx.Response(200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4]]})
 
     provider = OllamaEmbeddingProvider("http://ollama:11434", "bge-m3", client=client_for(handler))
@@ -48,6 +49,54 @@ def test_embed_query_accepts_single_embedding_shape():
     provider = OllamaEmbeddingProvider("http://ollama:11434", "bge-m3", client=client_for(handler))
 
     assert provider.embed_query("question") == [1.0, 2.0, 3.0]
+
+
+# 默认读超时 30s：keep_alive 常驻 + 启动预热消除冷加载后，embed 计算
+# 毫秒级，30s 足够且故障快速失败；连接超时保持短促快速发现不可达服务。
+def test_default_timeout_covers_cold_model_load():
+    provider = OllamaEmbeddingProvider("http://ollama:11434", "bge-m3")
+
+    timeout = provider.client.timeout
+    assert timeout.read == 30.0
+    assert timeout.write == 30.0
+    assert timeout.connect == 5.0
+
+
+def test_timeout_argument_overrides_read_and_write():
+    provider = OllamaEmbeddingProvider("http://ollama:11434", "bge-m3", timeout=300.0)
+
+    timeout = provider.client.timeout
+    assert timeout.read == 300.0
+    assert timeout.write == 300.0
+    assert timeout.connect == 5.0
+
+
+def test_keep_alive_argument_overrides_request_body():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"embeddings": [[0.1]]})
+
+    provider = OllamaEmbeddingProvider(
+        "http://ollama:11434",
+        "bge-m3",
+        client=client_for(handler),
+        keep_alive="30m",
+    )
+
+    provider.embed_query("question")
+
+    assert b'"keep_alive":"30m"' in requests[0].read()
+
+
+def test_injected_client_timeout_is_not_overridden():
+    client = client_for(lambda request: httpx.Response(200, json={"embeddings": [[0.1]]}))
+    client.timeout = 7.0
+
+    provider = OllamaEmbeddingProvider("http://ollama:11434", "bge-m3", client=client)
+
+    assert provider.client.timeout == httpx.Timeout(7.0)
 
 
 @pytest.mark.parametrize(

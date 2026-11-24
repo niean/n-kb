@@ -27,3 +27,5 @@ class RetrievalResult:
     source: dict[str, Any]
     tags: dict[str, str]
     metadata: dict[str, Any]
+    document_revision: str | None = None
+    chunk_content_hash: str | None = None

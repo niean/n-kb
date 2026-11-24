@@ -12,7 +12,15 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind
 
 from app.application import telemetry_semantics as ts
-from app.application.retrieval_service import RetrievalService
+# 刻意导入生产投影作为 integrity 对齐锚：验证"生产投影 == pydantic 载荷"，
+# 不在测试内维护镜像副本。
+from app.application.retrieval_service import (
+    RetrievalContext,
+    RetrievalOutcome,
+    RetrievalService,
+    _response_projection,
+)
+from app.domain.evaluation import canonical_json_bytes, compute_integrity
 from app.domain.retrieval import RetrievalResult
 from app.infrastructure.embedding.ollama_provider import OllamaEmbeddingProvider
 from app.infrastructure.observability.instrumentors import instrument_app
@@ -20,23 +28,43 @@ from app.infrastructure.observability.logging import HTTP_COMPLETED_EVENT
 from app.interfaces.http.routes import register_routes
 
 
-class FakeRetrievalService:
-    def __init__(self):
-        self.call = None
+def _fake_results():
+    return [
+        RetrievalResult(
+            document_id="doc-1",
+            chunk_id="chunk-1",
+            score=1,
+            snippet="safe snippet",
+            source={"kind": "upload", "uri": "note.md"},
+            tags={"topic": "rag"},
+            metadata={"ordinal": 0, "vector": [1.0, 2.0]},
+            document_revision="dochash-1",
+            chunk_content_hash="chunkhash-1",
+        )
+    ]
 
-    def search(self, query, filters=None, top_k=5):
+
+class FakeRetrievalService:
+    def __init__(self, with_context=True):
+        self.call = None
+        self.with_context = with_context
+
+    def search_with_context(self, query, filters=None, top_k=5):
         self.call = {"query": query, "filters": filters, "top_k": top_k}
-        return [
-            RetrievalResult(
-                document_id="doc-1",
-                chunk_id="chunk-1",
-                score=0.91,
-                snippet="safe snippet",
-                source={"kind": "upload", "uri": "note.md"},
-                tags={"topic": "rag"},
-                metadata={"ordinal": 0, "vector": [1.0, 2.0]},
+        results = _fake_results()
+        context = None
+        if self.with_context:
+            original = canonical_json_bytes(_response_projection(results))
+            context = RetrievalContext(
+                retrieval_id="retrieval-1",
+                captured_at="2026-01-01T00:00:00+00:00",
+                corpus_revision="rev-1",
+                trace_ref={"trace_id": "a" * 32, "span_id": "b" * 16, "sampled": True},
+                integrity=compute_integrity(
+                    original, original, truncated=False, incomplete=False
+                ),
             )
-        ]
+        return RetrievalOutcome(results=results, context=context)
 
 
 def build_client(service=None) -> TestClient:
@@ -46,7 +74,9 @@ def build_client(service=None) -> TestClient:
     return TestClient(app)
 
 def test_search_returns_query_and_results_without_vector_fields():
-    service = FakeRetrievalService()
+    # None-context 桩场景：evaluation_context 显式序列化为 null（决策已锁定：
+    # response_model 不排除 None 字段，键存在且值为 null）。
+    service = FakeRetrievalService(with_context=False)
     client = build_client(service)
 
     response = client.post(
@@ -62,15 +92,18 @@ def test_search_returns_query_and_results_without_vector_fields():
     assert response.status_code == 200
     assert response.json() == {
         "query": "what is rag",
+        "evaluation_context": None,
         "results": [
             {
                 "document_id": "doc-1",
                 "chunk_id": "chunk-1",
-                "score": 0.91,
+                "score": 1.0,
                 "snippet": "safe snippet",
                 "source": {"kind": "upload", "uri": "note.md"},
                 "tags": {"topic": "rag"},
                 "metadata": {"ordinal": 0},
+                "document_revision": "dochash-1",
+                "chunk_content_hash": "chunkhash-1",
             }
         ],
     }
@@ -82,6 +115,61 @@ def test_search_returns_query_and_results_without_vector_fields():
         "document_status": "indexed",
         "min_score": 0.5,
     }
+
+
+def test_search_response_includes_evaluation_context_fields():
+    service = FakeRetrievalService()
+    client = build_client(service)
+
+    response = client.post("/retrieval/search", json={"query": "what is rag"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    # results 形状不变：9 字段
+    assert set(payload["results"][0]) == {
+        "document_id",
+        "chunk_id",
+        "score",
+        "snippet",
+        "source",
+        "tags",
+        "metadata",
+        "document_revision",
+        "chunk_content_hash",
+    }
+    original = canonical_json_bytes(_response_projection(_fake_results()))
+    assert payload["evaluation_context"] == {
+        "retrieval_id": "retrieval-1",
+        "captured_at": "2026-01-01T00:00:00+00:00",
+        "corpus_revision": "rev-1",
+        "trace_ref": {"trace_id": "a" * 32, "span_id": "b" * 16, "sampled": True},
+        "integrity": {
+            "original_bytes": len(original),
+            "truncated": False,
+            "incomplete": False,
+            "observed_bytes": len(original),
+            "redaction_version": "v0",
+        },
+    }
+
+
+def test_search_evaluation_context_integrity_matches_response_payload():
+    # INTEGRITY 对齐（T4 审阅裁决）：响应 evaluation_context.integrity 的 canonical
+    # 输入必须是实际返回载荷对应的 9 字段投影（metadata 复现 mapper 的 vector 过滤）。
+    service = FakeRetrievalService()
+    client = build_client(service)
+
+    response = client.post("/retrieval/search", json={"query": "what is rag"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    integrity = payload["evaluation_context"]["integrity"]
+    expected_bytes = canonical_json_bytes({"results": payload["results"]})
+    assert integrity["incomplete"] is False
+    assert integrity["truncated"] is False
+    assert integrity["original_bytes"] == len(expected_bytes)
+    assert integrity["observed_bytes"] == len(expected_bytes)
+
 
 def test_search_uses_default_min_score_when_not_provided():
     service = FakeRetrievalService()
@@ -95,7 +183,8 @@ def test_search_uses_default_min_score_when_not_provided():
 
 def test_search_runtime_error_returns_infrastructure_error_without_details():
     class FailingRetrievalService(FakeRetrievalService):
-        def search(self, query, filters=None, top_k=5):
+        def search_with_context(self, query, filters=None, top_k=5):
+            self.call = {"query": query, "filters": filters, "top_k": top_k}
             raise RuntimeError("qdrant host secret")
 
     client = build_client(FailingRetrievalService())

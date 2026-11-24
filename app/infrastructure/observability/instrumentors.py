@@ -9,7 +9,8 @@
   重复调用幂等；middleware stack 已构建后拒绝安装；失败不外溢。
 - 全部安全投影在 SDK 接收前完成（写入阶段）：``_FilteringSpan`` 继承
   ``opentelemetry.trace.Span`` API 类型（isinstance 兼容），属性精确白名单
-  放行、``db.statement`` 只投影表名、``record_exception``/``add_event``/
+  放行、``db.statement``/``db.query.text`` 只投影表名与脱敏限长查询概要、
+  ``record_exception``/``add_event``/
   异常路径逐项拦截、``set_status`` 剥离 description。批准的详情仅通过
   注入策略新鲜验证后写入；不放行原始 SQL/参数或异常对象。
 - SERVER 仅现有注册业务路由（方法+模板白名单，模板来自真实路由表）；
@@ -40,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -81,9 +83,11 @@ ALLOWED_AUTO_ATTRIBUTES = frozenset((
     "url.template", "nkb.http.caller", "nkb.http.duration_ms",
     "network.protocol.name", "network.protocol.version",
     "network.peer.address", "network.peer.port",
-    # SQLite：系统/库名/操作/表名（statement 一律拦截并投影表名）
+    # SQLite：系统/库名/操作/表名（statement 一律拦截并投影表名）；
+    # 另有脱敏限长查询概要与返回概要（受影响行数/返回列名）。
     "db.system", "db.system.name", "db.name", "db.namespace",
     "db.operation", "db.collection.name", "db.sql.table",
+    "db.query.summary", "db.rows_affected", "db.returned_columns",
 ))
 
 # 不产生 SERVER span 的噪声路径（自检/健康/static/favicon/根重定向）。
@@ -100,6 +104,11 @@ _TABLE_PATTERN = re.compile(
 # 单引号字符串字面量（含 '' 转义）：内容可能命中 FROM/INTO 等关键字，
 # 先剥离再匹配，防止把字面量内容投影成表名（内容泄漏通道）。
 _SQL_LITERAL_PATTERN = re.compile(r"'(?:[^']|'')*'")
+# 查询/返回概要限长（与 _sanitize_attr_value 的 512 一致）。
+_QUERY_SUMMARY_MAX = 512
+_RETURNED_COLUMNS_MAX = 512
+# 概要空白折叠（SQL 换行/多空白归一为单空格）。
+_WS_PATTERN = re.compile(r"\s+")
 
 # 全局注册状态（恰好一次；标志仅在成功后提交）。
 _GLOBAL_LOCK = threading.Lock()
@@ -165,6 +174,23 @@ def _extract_table_name(statement):
     return match.group(1) if match else None
 
 
+def _extract_query_summary(statement):
+    """脱敏查询概要：字符串字面量替换为 ``?``、折叠空白并限长。
+
+    只保留查询形状（操作、列名、WHERE 骨架），绝不保留参数值或 SQL 原文。
+    """
+    if type(statement) is not str:
+        return None
+    try:
+        redacted = _SQL_LITERAL_PATTERN.sub("?", statement)
+        collapsed = _WS_PATTERN.sub(" ", redacted).strip()
+    except Exception:
+        return None
+    if not collapsed:
+        return None
+    return obs_logging.sanitize_text(collapsed[:_QUERY_SUMMARY_MAX])
+
+
 def _sanitize_attr_value(value):
     if type(value) is str:
         return obs_logging.sanitize_text(value)[:512]
@@ -172,6 +198,8 @@ def _sanitize_attr_value(value):
 
 
 def _valid_auto_attribute(key, value):
+    if key == "db.rows_affected":
+        return type(value) is int and value >= 0
     if key in ("http.response.status_code", "http.status_code"):
         return type(value) is int and 100 <= value <= 599
     if key in ("http.request.method", "http.method"):
@@ -199,9 +227,13 @@ def _filter_attributes(attributes):
         if type(key) is not str:
             continue
         if key in ("db.statement", "db.query.text"):
-            table = _extract_table_name(value) if type(value) is str else None
-            if table:
-                filtered["db.collection.name"] = table
+            if type(value) is str:
+                table = _extract_table_name(value)
+                if table:
+                    filtered["db.collection.name"] = table
+                summary = _extract_query_summary(value)
+                if summary:
+                    filtered["db.query.summary"] = summary
             continue
         if key in ALLOWED_AUTO_ATTRIBUTES and _valid_auto_attribute(key, value):
             filtered[key] = _sanitize_attr_value(value)
@@ -298,9 +330,13 @@ class _FilteringSpan(trace_api.Span):
             self._http_attributes = None
             self._http_started = None
         if key in ("db.statement", "db.query.text"):
-            table = _extract_table_name(value) if type(value) is str else None
-            if table:
-                self._set_projected("db.collection.name", table)
+            if type(value) is str:
+                table = _extract_table_name(value)
+                if table:
+                    self._set_projected("db.collection.name", table)
+                summary = _extract_query_summary(value)
+                if summary:
+                    self._set_projected("db.query.summary", summary)
             return
         if type(key) is str and key.startswith("nkb.content."):
             self._update_details({key:value})
@@ -1353,6 +1389,120 @@ def _set_httpx_self_traffic_exclusion(settings=None):
     os.environ["OTEL_PYTHON_HTTPX_EXCLUDED_URLS"] = ",".join(merged)
 
 
+def _attach_cursor_return_info(span, cursor):
+    """execute 完成后、DB CLIENT span 结束前补充返回概要（尽力而为）。
+
+    DB-API 语义下 execute 时 ``rowcount`` 只对 DML 有值（SELECT 为 -1）；
+    SELECT 的返回概要用 ``description`` 列名表达。行数须 fetch 后才知，
+    而 dbapi span 在 execute 返回即结束，因此不伪造行数。
+    """
+    try:
+        if span is None or not span.is_recording():
+            return
+        rowcount = getattr(cursor, "rowcount", None)
+        if type(rowcount) is int and rowcount >= 0:
+            span.set_attribute("db.rows_affected", rowcount)
+        description = getattr(cursor, "description", None)
+        if description:
+            columns = ",".join(
+                str(col[0]) for col in description if col and col[0]
+            )
+            if columns:
+                span.set_attribute(
+                    "db.returned_columns",
+                    obs_logging.sanitize_text(columns[:_RETURNED_COLUMNS_MAX]),
+                )
+    except Exception:
+        return
+
+
+class _KBSQLiteCursorProxy:
+    """游标薄代理（普通类，非 wrapt）：位于 dbapi TracedCursorProxy 内层。
+
+    dbapi 的 ``traced_execution`` 以 ``cursor.__wrapped__.execute`` 为
+    query_method，本代理的 execute 因此在 DB CLIENT span 存续窗口内运行，
+    可在 execute 返回后向 current span 补充返回概要。
+    """
+
+    __slots__ = ("_kb_cursor",)
+
+    def __init__(self, cursor):
+        object.__setattr__(self, "_kb_cursor", cursor)
+
+    def execute(self, *args, **kwargs):
+        span = trace_api.get_current_span()
+        result = self._kb_cursor.execute(*args, **kwargs)
+        _attach_cursor_return_info(span, self._kb_cursor)
+        return result
+
+    def executemany(self, *args, **kwargs):
+        span = trace_api.get_current_span()
+        result = self._kb_cursor.executemany(*args, **kwargs)
+        _attach_cursor_return_info(span, self._kb_cursor)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_kb_cursor"), name)
+
+
+class _KBSQLiteConnectionProxy:
+    """连接薄代理（普通类，非 wrapt）：位于 dbapi TracedConnectionProxy 内层。
+
+    ``cursor()`` 派生游标先经 ``_KBSQLiteCursorProxy`` 再被 dbapi 包装。
+    属性读写一律穿透到底层连接（如 ``row_factory`` 赋值），上下文管理器
+    同步委托；不得继承 wrapt ``BaseObjectProxy``，否则会被 dbapi 视为
+    已埋点连接而跳过包装。
+    """
+
+    __slots__ = ("_kb_connection",)
+
+    def __init__(self, connection):
+        object.__setattr__(self, "_kb_connection", connection)
+
+    def cursor(self, *args, **kwargs):
+        return _KBSQLiteCursorProxy(
+            self._kb_connection.cursor(*args, **kwargs)
+        )
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_kb_connection"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_kb_connection"), name, value)
+
+    def __enter__(self):
+        self._kb_connection.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._kb_connection.__exit__(*args)
+
+
+# sqlite3.connect 真实实现（包装恰好一次；注册后不卸载）。
+_SQLITE_CONNECT_REAL = None
+
+
+def _wrap_sqlite_connect():
+    """在 dbapi wrap_connect 之前包装 ``sqlite3.connect``。
+
+    本包装先应用（内层），dbapi 的 wrap_connect 后应用（外层），形成
+    real connect -> 本代理连接 -> TracedConnectionProxy 的叠加，使返回
+    概要注入点位于自动埋点 span 存续窗口内。失败仅降级（无返回概要），
+    不影响既有 CLIENT span。
+    """
+    global _SQLITE_CONNECT_REAL
+    if _SQLITE_CONNECT_REAL is not None:
+        return
+    _SQLITE_CONNECT_REAL = sqlite3.connect
+
+    def _kb_connect(*args, **kwargs):
+        return _KBSQLiteConnectionProxy(
+            _SQLITE_CONNECT_REAL(*args, **kwargs)
+        )
+
+    sqlite3.connect = _kb_connect
+
+
 def install_global_instrumentors(*, settings=None, tracer_provider=None):
     """注册进程级 httpx/sqlite3 instrumentor（恰好一次，成功后才提交标志）。
 
@@ -1378,6 +1528,7 @@ def install_global_instrumentors(*, settings=None, tracer_provider=None):
             if not _GLOBAL_STATE["sqlite3"]:
                 from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
 
+                _wrap_sqlite_connect()
                 SQLite3Instrumentor().instrument(tracer_provider=provider)
                 _GLOBAL_STATE["sqlite3"] = True
             return True

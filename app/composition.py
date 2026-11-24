@@ -1,18 +1,31 @@
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from app.application.corpus_revision import (
+    CorpusRevisionConfig,
+    CorpusRevisionService,
+    fingerprint_from_splitter,
+)
 from app.application.document_service import DocumentService
+from app.application.evaluation_capture import EvaluationCapture
+from app.application.evaluation_delivery import EvaluationDeliveryWorker
 from app.application.health_service import HealthService
 from app.application.ingestion_service import IngestionService
 from app.application.retrieval_service import RetrievalService
 from app.config import Settings
 from app.infrastructure.embedding.ollama_provider import OllamaEmbeddingProvider
+from app.infrastructure.evaluation.producer_client import ProducerClient
 from app.infrastructure.parsers.text_parser import SimpleTextParser, SimpleTextSplitter
 from app.infrastructure.persistence.sqlite_store import SQLiteStore
 from app.infrastructure.storage.local_object_store import LocalObjectStore
 from app.infrastructure.vector.qdrant_index import QdrantVectorIndex
+
+# 投递 worker 轮询间隔（容量/重试/心跳常量同属模块级固定，不做配置面）；
+# 心跳 60s 由 EvaluationDeliveryWorker.heartbeat_seconds 控制
+_EVALUATION_DELIVERY_INTERVAL_SECONDS = 5.0
 
 
 class _UnavailableQdrantClient:
@@ -27,6 +40,12 @@ class AppServices:
     index_jobs: SQLiteStore
     retrieval: RetrievalService
     health: HealthService
+    # 评估投递（endpoint/token 齐备才有实例）；组合根拥有 client 生命周期：
+    # lifespan 关闭时先 worker.close(15) 再 delivery_client.aclose()
+    delivery_worker: Optional[EvaluationDeliveryWorker] = None
+    delivery_client: Optional[ProducerClient] = None
+    # embedding provider 引用（入口层启动期预热用；不进入 SERVICE_KEYS）
+    embedding_provider: Any = None
 
 
 def _build_vector_index(settings: Settings) -> QdrantVectorIndex:
@@ -63,9 +82,46 @@ def build_services(
     embedding_provider = OllamaEmbeddingProvider(
         base_url=settings.embedding_base_url,
         model=settings.embedding_model,
+        timeout=settings.embedding_timeout_seconds,
+        keep_alive=settings.embedding_keep_alive,
         embedding_observer=embedding_observer,
     )
     vector_index = _build_vector_index(settings)
+
+    # 评估采集接线：corpus revision（配置指纹由实际 splitter 派生，装配期
+    # fail-fast）、capture hook（enabled 只控制新样本与五计数，context 组装
+    # 始终进行）、tombstone 原子删除端口。
+    corpus_revision_service = CorpusRevisionService(
+        sqlite_store,
+        CorpusRevisionConfig(
+            chunking_fingerprint=fingerprint_from_splitter(splitter),
+            embedding_provider="ollama",
+            embedding_model=settings.embedding_model,
+        ),
+    )
+    # T8 审阅裁决护栏：生产组合根必须注入原子删除端口（DocumentService 的
+    # evaluation_control_register 接收 sqlite_store，它提供
+    # delete_document_with_control/list/mark/clear 控制行接口），禁止配置关闭
+    # 或凭据缺失时静默回退非原子删除；注入由 tests/test_composition_wiring.py 锁定
+    evaluation_capture = EvaluationCapture(
+        sqlite_store, enabled=settings.evaluation_capture_enabled
+    )
+
+    # 投递对象仅在 endpoint 与 token 齐备时构造；缺失时不启动网络循环，
+    # 样本留存待补送，本地清理照常（spec 开关矩阵）
+    delivery_worker: Optional[EvaluationDeliveryWorker] = None
+    delivery_client: Optional[ProducerClient] = None
+    if settings.evaluation_endpoint_url and settings.evaluation_service_token:
+        delivery_client = ProducerClient(
+            settings.evaluation_endpoint_url, settings.evaluation_service_token
+        )
+        delivery_worker = EvaluationDeliveryWorker(
+            delivery_client,
+            sqlite_store,
+            sqlite_store,
+            _EVALUATION_DELIVERY_INTERVAL_SECONDS,
+            owner=f"n-kb-{uuid.uuid4().hex}",
+        )
 
     document_service = DocumentService(
         document_repository=sqlite_store,
@@ -73,6 +129,7 @@ def build_services(
         vector_index=vector_index,
         max_upload_bytes=settings.max_upload_bytes,
         allowed_extensions=settings.allowed_file_extensions,
+        evaluation_control_register=sqlite_store,
     )
     ingestion_service = IngestionService(
         document_repository=sqlite_store,
@@ -86,6 +143,9 @@ def build_services(
     retrieval_service = RetrievalService(
         embedding_provider=embedding_provider,
         vector_index=vector_index,
+        document_repository=sqlite_store,
+        corpus_revision=corpus_revision_service,
+        capture_hook=evaluation_capture,
     )
     health_service = HealthService(
         sqlite=sqlite_store,
@@ -98,6 +158,11 @@ def build_services(
         index_jobs=sqlite_store,
         retrieval=retrieval_service,
         health=health_service,
+        # 组合根暴露 embedding provider 供入口层启动期预热（模型冷加载挪到
+        # 应用启动期完成，不在首个检索请求上等待）
+        embedding_provider=embedding_provider,
+        delivery_worker=delivery_worker,
+        delivery_client=delivery_client,
     )
 
 

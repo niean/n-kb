@@ -77,6 +77,12 @@
   - 前端：左导收起时hover提示，一级菜单图标要有hover，告知用户这是什么菜单；同时，左导收起后二级菜单不弹出、无法点击，一并修复。前端的左导应该非常通用，建议跟N-Agent对齐、复用它的公共组件
   - 观测：N-KB 实际 Ollama 向量请求记录 gen_ai.operation.name=embeddings，但当前 Collector 将其投影为 generation，请修正
 
+[20261108]
+- FR
+  - 评估：[KF]引入评估
+  - 观测：span 25f967b3fe71b6d9，SELECT没有跨度属性不全，缺少查询、返回信息概要
+  - 检索：修复初次访问必超时失败的，原因是Ollama冷加载bge-m3
+
 ---
 
 [待办]

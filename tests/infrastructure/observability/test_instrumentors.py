@@ -494,6 +494,91 @@ def test_sqlite_table_projection_ignores_quoted_literals(instrumented):
         conn.close()
 
 
+def test_extract_query_summary_redacts_literals_and_collapses_whitespace():
+    """查询概要：字面量替换为 ``?``、空白折叠、限长；非字符串返回 None。"""
+    assert (
+        ins._extract_query_summary(
+            "SELECT id FROM documents WHERE title = 'SECRET VALUE' LIMIT 2"
+        )
+        == "SELECT id FROM documents WHERE title = ? LIMIT 2"
+    )
+    assert ins._extract_query_summary("SELECT\n\t'walked from harbor'\n  , 1") == "SELECT ? , 1"
+    assert ins._extract_query_summary("   ") is None
+    assert ins._extract_query_summary(None) is None
+    assert ins._extract_query_summary(b"SELECT 1") is None
+    long = "SELECT " + "a" * 2000
+    summary = ins._extract_query_summary(long)
+    assert summary is not None and len(summary) <= 512
+
+
+def test_sqlite_span_query_summary_and_return_info(instrumented):
+    """DB CLIENT span 携带脱敏查询概要与返回概要（SELECT 列名 / DML 行数）。"""
+    conn = sqlite3.connect(":memory:")
+    try:
+        with instrumented.provider.get_tracer("test").start_as_current_span("parent"):
+            conn.cursor().execute(
+                "CREATE TABLE docs_t5 (id INTEGER PRIMARY KEY, title TEXT)"
+            )
+            conn.commit()
+            conn.cursor().execute(
+                f"INSERT INTO docs_t5 (title) VALUES ('{SECRET_SQL}')"
+            )
+            conn.cursor().execute(
+                "SELECT id, title FROM docs_t5 WHERE title = 'walked from harbor' ORDER BY id"
+            ).fetchall()
+            conn.cursor().execute("CREATE INDEX docs_t5_title_idx ON docs_t5 (title)")
+        db_spans = [s for s in instrumented.spans if s.kind == SpanKind.CLIENT]
+        assert db_spans
+        by_name = {}
+        for span in db_spans:
+            attrs = _attrs(span)
+            assert set(attrs) <= set(ALLOWED_ATTRS)
+            by_name.setdefault(span.name, []).append(attrs)
+        # 查询概要：字面量脱敏为 ?，不泄漏哨兵或字面量内容
+        for name, attr_list in by_name.items():
+            for attrs in attr_list:
+                summary = attrs.get("db.query.summary")
+                assert type(summary) is str and summary.startswith(name)
+                assert SECRET_SQL not in json.dumps(attrs, default=str)
+                assert "harbor" not in json.dumps(attrs, default=str)
+        # SELECT：返回列名概要，无受影响行数
+        select_attrs = by_name["SELECT"][0]
+        assert select_attrs["db.query.summary"] == (
+            "SELECT id, title FROM docs_t5 WHERE title = ? ORDER BY id"
+        )
+        assert select_attrs["db.returned_columns"] == "id,title"
+        assert "db.rows_affected" not in select_attrs
+        # DML：受影响行数，无返回列名
+        insert_attrs = by_name["INSERT"][0]
+        assert insert_attrs["db.rows_affected"] == 1
+        assert "db.returned_columns" not in insert_attrs
+        # DDL：两者皆无（rowcount 为 -1、description 为空）
+        create_attrs = by_name["CREATE"][0]
+        assert "db.rows_affected" not in create_attrs
+        assert "db.returned_columns" not in create_attrs
+    finally:
+        conn.close()
+
+
+def test_sqlite_connection_proxy_preserves_row_factory_and_cursor_semantics(instrumented):
+    """连接代理必须穿透属性赋值（row_factory），游标链式 execute 语义不变。"""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.row_factory = sqlite3.Row
+        assert conn.row_factory is sqlite3.Row
+        with instrumented.provider.get_tracer("test").start_as_current_span("parent"):
+            row = conn.cursor().execute("SELECT 42 AS answer").fetchone()
+        assert row["answer"] == 42
+        with instrumented.provider.get_tracer("test").start_as_current_span("parent"):
+            conn.cursor().execute("CREATE TABLE proxy_t5 (id INTEGER)")
+        db_spans = [s for s in instrumented.spans if s.kind == SpanKind.CLIENT]
+        assert db_spans
+        attrs = _attrs(db_spans[-1])
+        assert attrs.get("db.query.summary") == "CREATE TABLE proxy_t5 (id INTEGER)"
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # CLIENT 门槛与抑制
 # ---------------------------------------------------------------------------

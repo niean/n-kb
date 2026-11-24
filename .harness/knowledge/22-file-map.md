@@ -54,7 +54,7 @@
 
 - 观测运行时：`app/infrastructure/observability/setup.py`，实现 `setup_observability`（Tracer/Meter/LoggerProvider 装配、OTLP exporter、采样、四信号状态机、ring buffer span processor、`_resolve_mode` disabled|local|export、诊断句柄与部分失败降级）
 - 安全摘要：`app/infrastructure/observability/snapshots.py`，有界指标聚合投影、系统安全子集和最近日志buffer，限额/窗口/截断/深副本与关闭清理
-- 自动埋点：`app/infrastructure/observability/instrumentors.py`，实现 FastAPI/HTTPX/SQLite3/SystemMetrics 全局埋点安装、remote parent 提取、有效include_router路由上下文遍历（保留嵌套prefix/method）、span 属性白名单投影、`suppress_client_spans` 抑制作用域与 client span 过滤
+- 自动埋点：`app/infrastructure/observability/instrumentors.py`，实现 FastAPI/HTTPX/SQLite3/SystemMetrics 全局埋点安装、remote parent 提取、有效include_router路由上下文遍历（保留嵌套prefix/method）、span 属性白名单投影、`suppress_client_spans` 抑制作用域与 client span 过滤；SQLite 在 wrap_connect 前叠加内层连接/游标薄代理（`_KBSQLite*Proxy`），在 DB CLIENT span 窗口内投影脱敏查询概要 `db.query.summary` 与返回概要（`db.rows_affected`/`db.returned_columns`）
 - 日志安全出口：`app/infrastructure/observability/logging.py`，实现 fail-closed 事件注册表（`register_safe_event`）、脱敏限长 owned handler 与 stdio stdout 零写入合同
 - 采集前脱敏：`app/infrastructure/observability/sanitizer.py`，实现字段白名单、凭据遮盖目录（`configure_secret_catalog`）与嵌套内容键拒绝
 - Profile 采样器：`app/infrastructure/observability/profiling.py`，实现 py-spy 子进程窗口采样、折叠栈投影、16 MiB/时窗上限、三振出局退避停用与 Pyroscope 上传

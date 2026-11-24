@@ -22,13 +22,25 @@ class OllamaEmbeddingProvider:
         model: str,
         client: httpx.Client | None = None,
         timeout: float = 30.0,
+        keep_alive: str = "-1",
         *,
         embedding_observer: EmbeddingObserverFactory | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self._model = model
         self.model = model
-        self.client = client or httpx.Client(base_url=self.base_url, timeout=timeout)
+        # 连接超时保持短促，不可达服务快速失败。外部注入 client 时不覆盖其
+        # 既有超时配置。读超时需覆盖的窗口取决于 keep_alive/预热是否消除
+        # 冷加载（默认组合下 embed 计算毫秒级；冷加载窗口见 config 注释）。
+        request_timeout = (
+            httpx.Timeout(timeout, connect=min(5.0, timeout)) if client is None else None
+        )
+        self.client = client or httpx.Client(
+            base_url=self.base_url, timeout=request_timeout
+        )
+        # keep_alive 随每次 embed 请求透传（默认 "-1" 模型常驻，消除空闲
+        # 卸载后的冷加载窗口）。
+        self._keep_alive = keep_alive
         self._embedding_observer = embedding_observer
 
     @contextlib.contextmanager
@@ -95,7 +107,11 @@ class OllamaEmbeddingProvider:
         try:
             response = self.client.post(
                 f"{self.base_url}/api/embed",
-                json={"model": self.model, "input": inputs},
+                json={
+                    "model": self.model,
+                    "input": inputs,
+                    "keep_alive": self._keep_alive,
+                },
             )
             if response.status_code < 200 or response.status_code >= 300:
                 raise RuntimeError("embedding_provider_failed")

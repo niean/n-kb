@@ -58,6 +58,35 @@ def test_sqlite_store_initializes_schema_indexes_and_round_trips_document(tmp_pa
     assert "idx_index_jobs_document_created_at" in job_indexes
 
 
+def test_sqlite_store_batch_selects_documents_by_ids(tmp_path):
+    """批量查询：命中/缺失混合、重复 ID 去重、空/None 输入安全；缺失不出现。"""
+    store = SQLiteStore(tmp_path / "n-kb.db")
+    kept = make_document(document_id="doc-keep", status=DocumentStatus.INDEXED)
+    uploaded = make_document(document_id="doc-uploaded")
+    store.save_document(kept, make_content("doc-keep"), [])
+    store.save_document(uploaded, make_content("doc-uploaded"), [])
+
+    documents = store.get_documents_by_ids(
+        ["doc-keep", "doc-missing", "doc-uploaded", "doc-keep", ""]
+    )
+
+    assert {document.id for document in documents} == {"doc-keep", "doc-uploaded"}
+    assert store.get_documents_by_ids([]) == []
+
+
+def test_sqlite_store_batch_select_chunks_beyond_max_ids(tmp_path):
+    """超过 BATCH_IDS_MAX 的 ID 自动分批，全部命中不遗漏。"""
+    store = SQLiteStore(tmp_path / "n-kb.db")
+    total = store.BATCH_IDS_MAX + 3
+    for index in range(total):
+        document = make_document(document_id=f"doc-{index:02d}")
+        store.save_document(document, make_content(f"doc-{index:02d}"), [])
+
+    documents = store.get_documents_by_ids([f"doc-{index:02d}" for index in range(total)])
+
+    assert {document.id for document in documents} == {f"doc-{index:02d}" for index in range(total)}
+
+
 def test_sqlite_store_finds_document_by_content_hash(tmp_path):
     store = SQLiteStore(tmp_path / "n-kb.db")
     document = make_document()

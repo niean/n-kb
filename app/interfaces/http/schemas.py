@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.application.retrieval_service import RetrievalContext
 from app.domain.chunk import Chunk
 from app.domain.document import Document, DocumentContent
 from app.domain.indexing import IndexJob
@@ -68,11 +69,24 @@ class RetrievalResultResponse(BaseModel):
     source: dict[str, Any]
     tags: dict[str, str]
     metadata: dict[str, Any]
+    document_revision: str | None = None
+    chunk_content_hash: str | None = None
+
+
+class EvaluationContextResponse(BaseModel):
+    retrieval_id: str
+    captured_at: str
+    corpus_revision: str | None = None
+    trace_ref: dict[str, Any] | None = None
+    integrity: dict[str, Any] | None = None
 
 
 class RetrievalSearchResponse(BaseModel):
     query: str
     results: list[RetrievalResultResponse]
+    # None 显式序列化为 null（response_model 不排除 None 字段），供消费方区分
+    # 无上下文与字段缺省。
+    evaluation_context: EvaluationContextResponse | None = None
 
 
 def tags_to_dict(tags: list[Tag] | None) -> dict[str, str]:
@@ -129,6 +143,8 @@ def request_filters_to_domain(filters: RetrievalFiltersRequest, min_score: float
 
 
 def retrieval_result_to_response(result: RetrievalResult) -> RetrievalResultResponse:
+    # 字段形状与 app/application/retrieval_service._response_projection 保持一致
+    # （9 字段、metadata 过滤 "vector" 键），response integrity 依赖该投影。
     metadata = {key: value for key, value in result.metadata.items() if key != "vector"}
     return RetrievalResultResponse(
         document_id=result.document_id,
@@ -138,4 +154,18 @@ def retrieval_result_to_response(result: RetrievalResult) -> RetrievalResultResp
         source=result.source,
         tags=result.tags,
         metadata=metadata,
+        document_revision=result.document_revision,
+        chunk_content_hash=result.chunk_content_hash,
+    )
+
+
+def context_to_response(context: RetrievalContext | None) -> EvaluationContextResponse | None:
+    if context is None:
+        return None
+    return EvaluationContextResponse(
+        retrieval_id=context.retrieval_id,
+        captured_at=context.captured_at,
+        corpus_revision=context.corpus_revision,
+        trace_ref=dict(context.trace_ref) if context.trace_ref is not None else None,
+        integrity=dict(context.integrity),
     )

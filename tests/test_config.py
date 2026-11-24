@@ -13,6 +13,8 @@ N_KB_ENV_VARS = (
     "N_KB_QDRANT_COLLECTION",
     "N_KB_EMBEDDING_BASE_URL",
     "N_KB_EMBEDDING_MODEL",
+    "N_KB_EMBEDDING_TIMEOUT_SECONDS",
+    "N_KB_EMBEDDING_KEEP_ALIVE",
     "N_KB_INGESTION_BATCH_SIZE",
     "N_KB_MAX_UPLOAD_BYTES",
     "N_KB_ALLOWED_FILE_EXTENSIONS",
@@ -36,7 +38,11 @@ def test_settings_defaults_are_local_paths(monkeypatch):
     assert settings.qdrant_collection == "n_kb_documents"
     assert settings.embedding_base_url == "http://localhost:11434"
     assert settings.embedding_model == "bge-m3"
-    assert settings.ingestion_batch_size == 16
+    # 默认读超时 30s：keep_alive 常驻 + 启动预热消除冷加载后，embed 计算
+    # 毫秒级，30s 足够且故障快速失败
+    assert settings.embedding_timeout_seconds == 30.0
+    # keep_alive=-1：模型常驻 Ollama 内存，消除空闲卸载后的冷加载
+    assert settings.embedding_keep_alive == "-1"
     assert settings.max_upload_bytes == 2 * 1024 * 1024
     assert settings.allowed_file_extensions == {".md", ".txt"}
     assert settings.mcp_enabled is False
@@ -69,6 +75,8 @@ def test_settings_reads_n_kb_prefixed_environment(monkeypatch):
     monkeypatch.setenv("N_KB_QDRANT_COLLECTION", "test_collection")
     monkeypatch.setenv("N_KB_EMBEDDING_BASE_URL", "http://ollama:11434")
     monkeypatch.setenv("N_KB_EMBEDDING_MODEL", "test-model")
+    monkeypatch.setenv("N_KB_EMBEDDING_TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv("N_KB_EMBEDDING_KEEP_ALIVE", "30m")
     monkeypatch.setenv("N_KB_INGESTION_BATCH_SIZE", "32")
     monkeypatch.setenv("N_KB_MAX_UPLOAD_BYTES", "4096")
     monkeypatch.setenv("N_KB_ALLOWED_FILE_EXTENSIONS", ".md,.txt")
@@ -86,6 +94,8 @@ def test_settings_reads_n_kb_prefixed_environment(monkeypatch):
     assert settings.qdrant_collection == "test_collection"
     assert settings.embedding_base_url == "http://ollama:11434"
     assert settings.embedding_model == "test-model"
+    assert settings.embedding_timeout_seconds == 300.0
+    assert settings.embedding_keep_alive == "30m"
     assert settings.ingestion_batch_size == 32
     assert settings.max_upload_bytes == 4096
     assert settings.allowed_file_extensions == {".md", ".txt"}
@@ -341,3 +351,152 @@ def test_endpoint_error_messages_do_not_echo_url_or_credentials(
             assert "secret" not in message
             assert "user:pass" not in message
             assert "collector" not in message
+
+
+# --- 评估采集配置（T9：B 类启动期 env-only） ---
+
+EVALUATION_ENV_VARS = (
+    "N_KB_EVALUATION_CAPTURE_ENABLED",
+    "N_KB_EVALUATION_ENDPOINT_URL",
+    "N_KB_EVALUATION_SERVICE_TOKEN",
+)
+
+INVALID_EVALUATION_ENDPOINTS = [
+    "ftp://n-agent:8000",
+    "n-agent:8000",
+    "http://",
+    "http:///v1/traces",
+    "http://user:pass@n-agent:8000",
+    "http://@n-agent:8000",
+    "http://n-agent:8000/?token=secret",
+    "http://n-agent:8000/#frag",
+    "http://n-agent:notaport",
+    "http://n-agent:70000",
+    "http://n-agent:0",
+]
+
+LOCAL_HTTP_ENDPOINTS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://[::1]:8000",
+    "http://nkb.localhost:8000",
+    "http://n-agent:8000",
+    "http://n-kb-collector",
+]
+
+EXTERNAL_HTTP_ENDPOINTS = [
+    "http://collector.example.com:8000",
+    "http://evaluation.example.com",
+    "http://192.0.2.1:8000",
+]
+
+VALID_EVALUATION_ENDPOINTS = LOCAL_HTTP_ENDPOINTS + [
+    "https://collector.example.com",
+    "https://collector.example.com:8000",
+    "https://collector.example.com/base",
+]
+
+
+def _evaluation_settings_with(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> Settings:
+    for env_var in EVALUATION_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)
+
+
+def test_settings_evaluation_capture_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for env_var in EVALUATION_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.evaluation_capture_enabled is False
+    assert settings.evaluation_endpoint_url == ""
+    assert settings.evaluation_service_token == ""
+
+
+def test_settings_reads_evaluation_capture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _evaluation_settings_with(
+        monkeypatch,
+        {
+            "N_KB_EVALUATION_CAPTURE_ENABLED": "true",
+            "N_KB_EVALUATION_ENDPOINT_URL": "https://n-agent.example.com/base",
+            "N_KB_EVALUATION_SERVICE_TOKEN": "shared-secret",
+        },
+    )
+
+    assert settings.evaluation_capture_enabled is True
+    assert settings.evaluation_endpoint_url == "https://n-agent.example.com/base"
+    assert settings.evaluation_service_token == "shared-secret"
+
+
+def test_settings_evaluation_capture_enabled_alone_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 捕获可独立运行（样本留存待补送），endpoint/token 缺失不构成配置错误
+    settings = _evaluation_settings_with(
+        monkeypatch, {"N_KB_EVALUATION_CAPTURE_ENABLED": "true"}
+    )
+
+    assert settings.evaluation_capture_enabled is True
+    assert settings.evaluation_endpoint_url == ""
+    assert settings.evaluation_service_token == ""
+
+
+@pytest.mark.parametrize("value", INVALID_EVALUATION_ENDPOINTS)
+def test_evaluation_endpoint_rejects_invalid_urls(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        _evaluation_settings_with(
+            monkeypatch, {"N_KB_EVALUATION_ENDPOINT_URL": value}
+        )
+
+    messages = _error_messages(excinfo)
+    assert messages
+    for message in messages:
+        assert value not in message
+        assert "secret" not in message
+
+
+@pytest.mark.parametrize("value", EXTERNAL_HTTP_ENDPOINTS)
+def test_evaluation_endpoint_rejects_external_http(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # 外部地址（非本机/内网单标签名）必须使用 HTTPS
+    with pytest.raises(ValidationError) as excinfo:
+        _evaluation_settings_with(
+            monkeypatch, {"N_KB_EVALUATION_ENDPOINT_URL": value}
+        )
+
+    messages = _error_messages(excinfo)
+    assert any("evaluation_endpoint_url" in message for message in messages)
+
+
+@pytest.mark.parametrize("value", VALID_EVALUATION_ENDPOINTS)
+def test_evaluation_endpoint_accepts_valid_urls(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    settings = _evaluation_settings_with(
+        monkeypatch, {"N_KB_EVALUATION_ENDPOINT_URL": value}
+    )
+
+    # 可选基路径原样保留（拼接 producer 路径时由投递客户端负责）
+    assert settings.evaluation_endpoint_url == value
+
+
+def test_evaluation_endpoint_error_messages_do_not_echo_url_or_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = "http://user:secret@collector.example.com:8000"
+
+    with pytest.raises(ValidationError) as excinfo:
+        _evaluation_settings_with(
+            monkeypatch, {"N_KB_EVALUATION_ENDPOINT_URL": bad}
+        )
+
+    messages = _error_messages(excinfo)
+    assert messages
+    for message in messages:
+        assert bad not in message
+        assert "secret" not in message
+        assert "collector.example.com" not in message
